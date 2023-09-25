@@ -1,2 +1,3 @@
-# EM-Lyon
- Practice at EMLyon
+# EM-Lyon DSAIS
+
+ ![avatar](./week1_Python_practice/images/720.jpeg)
