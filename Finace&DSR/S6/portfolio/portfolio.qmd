@@ -1,0 +1,221 @@
+---
+title: "Simple portfolio strategies"
+format: html
+---
+
+
+```{r, message = F, warning = F}
+library(quantmod)   # This is to fetch financial data
+library(tidyverse)
+```
+
+# Data from Yahoo API
+
+The `{quantmod}` package, [though imperfect](https://github.com/joshuaulrich/rfimport), is used to retrieve data from [Yahoo Finance](https://finance.yahoo.com/).  
+
+```{r}
+min_date <- "2000-01-01"                      # Starting date
+max_date <- "2024-04-27"                      # Ending date
+tickers <- c("AAPL", "BA", "C", "PFE", "WMT", "XOM", "F", "DIS", "GE", "CVX", "MSFT", "GS", "NFLX")
+
+import_sym <- function(ticker){
+  getSymbols(ticker, src = 'yahoo',  # The data comes from Yahoo Finance
+                     from = min_date,         # Start date
+                     to = max_date,           # End date
+                     auto.assign = FALSE, 
+                     warnings = FALSE) |>
+    data.frame() |>
+    rownames_to_column("Date") |>
+    `colnames<-`(c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted")) |>
+    mutate(Ticker = ticker, .before = 2,
+           Date = as.Date(Date))
+}
+
+data <- tickers |> map_dfr(import_sym)
+
+head(data, 7)                               # Have a look at the result!
+```
+
+Below, we create a **mean-reverting** trading strategy that buys stocks only if the *Close* on the previous day way below the *Open* of the previous day. 
+
+```{r}
+data |>
+  mutate(position = Close < Open) |>                      # This creates the strategy criterion
+  mutate(position = lag(position),                        # It is applied on the previous date
+         Return = Adjusted / lag(Adjusted) - 1,           # We compute the returns
+         .by = Ticker) |>      
+  mutate(weight = position / max(1,sum(position)),        # Relative weights computed for each date 
+         .by = Date) |>  
+  summarise(return = sum(weight * Return, na.rm = T),     # We compute the portfolio return
+            .by = Date) |> 
+  na.omit() |>                                            # Remove the (first) missing point
+  mutate(value = cumprod(1+return)) |>                    # The portfolio value
+  ggplot(aes(x = Date, y = value)) + geom_line() + 
+  theme_classic() + ylab("") + xlab("")
+  
+```
+
+**NOTE**: in practice, **daily** trading is very expensive due to **transaction costs**! Hence, returns and values would be much smaller in real life.
+
+
+
+
+# Bloomberg data
+
+First, we load the data and create the *forward* return. 
+
+```{r}
+load("data.RData")
+data <- data  %>% 
+    select(-ESG_rank) %>%                                   # Remove ESG: too few points
+    arrange(Date,Tick) |>
+    group_by(Tick) %>%                          
+    mutate(F_Return = lead(Close) / Close - 1) %>%          # Adding forward/future returns
+    na.omit() %>%                                           # Take out missing data
+    ungroup()
+```
+
+## Strategies with the tidyverse
+
+The simplest, naive strategy: equally-weighting stocks
+
+```{r}
+data |>
+  group_by(Date) |>
+  summarise(r_ew = mean(F_Return)) |>
+  head(6)
+```
+
+A second strategy: inverse-volatility weighting
+
+```{r}
+data |>
+  group_by(Date) |>
+  mutate(weight = 1/Vol_1M,
+         weight = weight / sum(weight)) |> 
+  summarise(r_iv = sum(F_Return * weight)) |>
+  head(6)
+```
+
+Comparing the two. 
+
+```{r}
+data |>
+  group_by(Date) |>
+  mutate(weight = 1/Vol_1M,
+         weight = weight / sum(weight)) |> 
+  summarise(r_iv = sum(F_Return * weight),
+            r_ew = mean(F_Return)) |> 
+  na.omit() |>
+  mutate(EW = cumprod(1+r_ew),
+         IV = cumprod(1+r_iv)) |>
+  pivot_longer(EW:IV, 
+               names_to = "strategy", values_to = "port_value") |>
+  ggplot(aes(x = Date, y = port_value, color = strategy)) + geom_line() +
+  theme_classic() + xlab("") + ylab("") +
+  theme(legend.position = c(0.2,0.8))
+```
+
+
+## Backtesting with loops
+
+Below we code a dynamic backtest based on an XGBoost predictive engine.   
+The model predicts returns and allocates to the top 10 of the stocks (with highest predictions).
+First, we normalize the features.  
+
+```{r, message = F, warning = F}
+normalise <-  function(v){  # This is a function that 'uniformises' a vector
+    v <- v %>% as.matrix()
+    return(ecdf(v)(v))
+}
+
+data_f <- data %>%                        # Data with normalised values
+    dplyr::select(-Close) %>%               # Closing prices are not predictors
+    group_by(Date) %>%                      # Normalisation takes place for each given date
+    mutate_if(is.numeric, normalise) %>%    # Apply normalisation on numerical columns
+    ungroup() %>%                           # Ungroup
+    arrange(Date, Tick)                     # Just making sure the order is still the same as before
+data_f$F_Return <- data$F_Return          # We retrieve the original returns: better for interpretation
+```
+
+
+
+Then, we initialize some important variables.
+
+```{r, message = F, warning = F}
+sep_date <- as.Date("2008-01-01")             # This date separates in-sample vs out-of-sample
+tick <- unique(data$Tick)                     # Set of assets
+t_oos <- data$Date[data$Date > sep_date] %>%  # Out-of-sample dates (i.e., testing set)
+    unique() %>%
+    as.Date(origin = "1970-01-01")
+Tt <- length(t_oos) - 1                                         # Nb of dates, avoid T = TRUE
+nb_port <- 2                                                    # Nb of portfolios
+portf_weights <- array(0, dim = c(Tt, nb_port, length(tick)))   # Store weights
+portf_returns <- matrix(0, nrow = Tt, ncol = nb_port)           # Store returns
+```
+
+
+Next, we craft the portfolio compositions - embedded in a dedicated function.   
+We test 2 strategies: naive + XGBoost.
+
+```{r, message = F, warning = F}
+library(xgboost)
+weights_multi <- function(train_data, test_data, j){
+    N <- test_data$Tick %>% unique() %>% length() # Number of stocks
+    features <- c("Mkt_Cap", "P2B", "Vol_1M", "D2E", "Prof_Marg") # Hard-coded, BEWARE!
+    if(j == 1){                             # j = 1 => EW
+        return(rep(1/N,N))
+    }
+    if(j == 2){                             # j = 2 => tree-based
+        # Below, we quickly format the data
+        train_features <- train_data %>% select(features) %>% as.matrix()       # Indep. variable
+        train_label <- train_data$F_Return                                      # Dependent variable
+        train_matrix <- xgb.DMatrix(data = train_features, label = train_label) # XGB format
+        fit <- train_matrix %>% 
+            xgb.train(data = .,                       # Data source (pipe input)
+                      eta = 0.5,                      # Learning rate
+                      objective = "reg:squarederror", # Number of random trees
+                      max_depth = 4,                  # Maximum depth of trees
+                      nrounds = 15                    # Number of trees used
+            )
+        xgb_test <- test_data %>%                   # Test sample => XGB format
+            select(features) %>% 
+            as.matrix() %>%
+            xgb.DMatrix()
+        
+        pred <- predict(fit, xgb_test)              # Single prediction
+        w <- pred > quantile(pred, 2/3)
+        return(w / sum(w))                          # Ten largest values, equally-weighted
+    }
+}
+```
+
+Finally, we loop on all out-of-sample dates.
+
+```{r, message = F, warning = F}
+for(t in 1:(length(t_oos)-1)){                        # Stop before the last date: no fwd return!
+    if(t%%12==0){print(t_oos[t])}                       # Just checking the date status
+    train_data <- data_f %>% filter(Date < t_oos[t])    # Expanding window: all past values!!!
+    test_data <- data_f %>% filter(Date == t_oos[t])    # Current values
+    realized_returns <- data %>%                        # Computing returns via:
+        filter(Date ==  t_oos[t]) %>%                     # Filtering
+        select(F_Return)                                  # Selecting
+    for(j in 1:nb_port){                                     
+        portf_weights[t,j,] <- weights_multi(train_data, test_data, j)  # Hard-coded params, beware!
+        portf_returns[t,j] <- sum(portf_weights[t,j,] * realized_returns)
+    }
+}
+```
+
+
+A brief look at performance.
+
+```{r}
+apply(portf_returns, 2, mean)                               # Average monthly return
+apply(portf_returns, 2, sd)                                 # Monthly volatility
+
+```
+
+
+
+

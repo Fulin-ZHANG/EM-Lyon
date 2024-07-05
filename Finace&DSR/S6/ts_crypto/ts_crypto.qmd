@@ -1,0 +1,639 @@
+---
+title: "Time-series & cryptocurrencies"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    page-layout: full
+    df-print: kable
+    fontsize: 1.0em
+    embed-resources: true
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+**WARNING**: this notebook relies on several **R packages**. Whenever
+one is called (for instance via a call such as "*library(torch)*"), this
+implies that the package has been installed, e.g., via
+"*install.packages("torch")*". Hence, make sure the following packages
+are installed!
+
+```{r}
+# install.packages("tidyverse") 
+# install.packages(c("forecast", "quantmod", "crypto2", "RcppRoll", "rugarch", "fGarch"))
+# install.package(c("fable", "tsibble", "feasts", "keras", "highcharter", "plotly"))
+```
+
+```{r, message = F, warning = F}
+library(tidyverse)
+```
+
+# Crash course on time-series
+
+## Definitions & notations
+
+Time-series are random variables indexed by time. Usually, they are
+written $x_t$, or $X_t$ or $y_t$ or similar notations of this kind. The
+index $t$ refers to *time*. The essential question in time-series is to
+determine the law of motion of the process, as well as its
+characteristics.
+
+Most often, the process integrates some form of randomness, which is
+usually written $e_t$, $\epsilon_t$ or $\varepsilon_t$. There are two
+common simplifying assumptions that are made with respect to these
+quantities, which are sometimes referred to as *innovations* or
+*residuals*:
+
+1.  they can be normally distribution (with Gaussian law);\
+2.  they are independent from each-other.
+
+**NOTE**: in almost all models, innovations have zero means,
+$\mathbb{E}[e_t]=0$, hence in the case of Gaussian innovations, only the
+variance $\sigma^2$ is specified. We will work under these (standard)
+assumptions below. Let's generate a series of $e_t$ and plot it below.
+
+```{r}
+N <- 120
+sigma <- 0.2
+x <- rnorm(N, mean = 0, sd = sigma)
+data.frame(t = 1:N, x = x) |>
+  ggplot(aes(x = t, y = x)) + geom_line() + theme_minimal()
+mean(x)
+sd(x)
+```
+
+## Examples
+
+### The random walk
+
+The simplest case is the **white noise**: $$x_t= e_t,$$
+
+but this is not very interesting. A second important case is linked to
+the notion of *random walk*: $$x_t=x_{t-1}+e_t,$$ and, iterating, we see
+that we have $x_t=\sum_{s=0}^t e_s$ - where we assume a starting point
+at $t=0$. Notably, we have
+$$\mathbb{E}[x_t]=\mathbb{E}\left[\sum_{s=0}^t e_s\right]=\sum_{s=0}^t\mathbb{E}\left[ e_s\right]=0.$$
+
+Moreover, if the innovations are independent,
+
+$$\mathbb{V}[x_t]=\mathbb{V}\left[\sum_{s=0}^t e_s\right]=\sum_{s=0}^t\mathbb{V}\left[ e_s\right]=t\sigma^2.$$
+
+Hence, the variance increases with time - linearly. If perturbations are
+*not* independent, then it's a bit more complicated and the variance
+will depend on all *auto-covariances*.
+
+The covariance between two points in time is given by:
+
+$$\mathbb{C}ov[x_t,x_{t+h}]=t\sigma^2, \quad h \ge 0.$$ This is because
+all innovation terms are independent, hence the only ones that are
+non-null are the $t$ terms of the form $\mathbb{C}ov[x_s,x_s]=\sigma$.
+
+Hence, we see that both the variance and auto-covariance depend on $t$,
+say, the present time. This makes analysis complicated, because,
+depending on the moment we consider, the distribution of $x_t$ will
+change.
+
+Let's simulate one trajectory.
+
+```{r}
+set.seed(42) # This freezes the random number generator
+x <- cumsum(rnorm(N, mean = 0, sd = sigma))
+tibble(t = 1:N, x = x) |>
+  ggplot(aes(x = t, y = x)) + geom_line() + theme_minimal()
+```
+
+### The auto-regressive model
+
+Let us introduce a small modification to the above process and consider:
+$$x_t=a+\rho x_{t-1}+e_t, \quad a \in \mathbb{R}, \quad |\rho|< 1.$$
+This process is called the Auto-Regressive model of order one and is
+written AR(1). Iterating, we have:
+$$x_t = a + \rho (a + \rho x_{t-2}+e_{t-1})+e_{t}$$ and, until
+infinity...
+$$x_t=a \sum_{k=0}^\infty\rho^k+ \sum_{k=0}^\infty \rho^ke_{t-k}=\frac{a}{1-\rho}+ \sum_{k=0}^\infty \rho^ke_{t-k},$$
+which explains why we need $|\rho|<1$.
+
+Again, we have
+
+$$\mathbb{E}[x_t]=\frac{a}{1-\rho}, $$ and when innovations are
+independent,
+$$\mathbb{V}[x_t]=\mathbb{V}\left[\sum_{k=0}^\infty \rho^ke_{t-k} \right]=\sum_{k=0}^\infty \mathbb{V}\left[\rho^ke_{t-k} \right]=\frac{\sigma^2}{1-\rho^2}.$$
+
+In this case, we see that the **mean** and **variance** do not depend on
+$t$! (obvious given the infinite series)
+
+Moreover,
+
+$$\mathbb{C}ov[x_t,x_{t+h}]=\mathbb{C}ov\left[\sum_{k=0}^\infty \rho^ke_{t-k} ,\sum_{j=0}^\infty \rho^je_{t-j+h} \right]=\sum_{k=0}^\infty \sum_{j=0}^\infty \mathbb{C}ov\left[ \rho^ke_{t-k}, \rho^je_{t-j+h} \right]$$
+Again, we need to focus on the cases when the time indices are equal, so
+$$\mathbb{C}ov[x_t,x_{t+h}]=\sum_{k=0}^\infty \sum_{j=h}^\infty \mathbb{C}ov\left[ \rho^ke_{t-k}, \rho^{j-h}e_{t-j} \right]=\sum_{k=0}^\infty \sum_{j=h}^\infty \rho^{k+j-h}\mathbb{C}ov[e_{t-k},e_{t-j} ]$$
+
+Thus, for $j=k$, we get
+$$\mathbb{C}ov[x_t,x_{t+h}]=\sigma \sum_{j=h}^\infty \rho^{2j-h}=\sigma^2 \rho^h  \sum_{j=0}^\infty \rho^{2j}=\sigma^2\frac{\rho^h}{1-\rho^2}.$$
+Again, this does not depend on the time index $t$. If innovations are
+Gaussian, as Gaussian distributions are entirely defined by their first
+two moments, this means that the full (unconditional) distribution of
+the process is **invariant**. This very convenient property is called
+**stationarity**, and comes in various flavors (have a look on the
+net!). It is very suitable for analysis because now we know that the
+object that we study (the underlying distribution) is stable in time.
+
+The above quantity, which measures the link between different
+realizations of the same variable (at different points in time) is very
+important. Often, the covariance is scaled by the variance to yield the
+**auto-correlation** of the process. Relatedly, there is the
+**auto-correlogram**, which is defined, for stationary series, as
+
+$$\gamma(h)=\mathbb{C}orr[x_t,x_{t+h}].$$ For the AR(1),
+$\gamma(h)=\rho^h$.
+
+More generally, autoregressive models of higher orders (AR(p)) have
+memory that goes back further in time:
+$$x_t=a+\sum_{k=1}^p\rho_k x_{t-k}+e_t, \quad a \in \mathbb{R},$$
+
+Even more generally, there are ARMA(p,q) processes, defined as
+$$x_t=a+\sum_{k=1}^p\rho_k x_{t-k} +\sum_{j=1}^q\delta_je_{t-j}+e_t, \quad a \in \mathbb{R},$$
+
+but more in these is left to your curiosity.
+
+Let's simulate two such processes. We refer to the
+[ARIMA](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/arima.html)
+page for details on the implementation. The order is $(p,d,q)$, like in
+the ARMA(p,q) process (the $d$ is for integration, a notion out of the
+scope of this course).
+
+```{r}
+x_05 <- arima.sim(list(order = c(1,0,0), ar=.05), n = N)
+x_95 <- arima.sim(list(order = c(1,0,0), ar=.95), n = N)
+tibble(time = 1:N, x_05 = x_05, x_95 = x_95) |>
+  pivot_longer(-time, names_to = "process", values_to = "values") |>
+  ggplot(aes(x = time, y = values, color = process)) + geom_line() +
+  theme_bw() +
+  scale_color_manual(values = c("#DD9911", "#0066AA"))
+```
+
+One of the processes seems to be just white noise, the other evolves
+more slowly and oscillates much less.
+
+Let's have a look at the auto-correlogram of the series. In **R**, ACF
+means AutoCorrelation Function. There is a function that shows it in the
+form of a gg-plot.
+
+```{r, message = F, warning = F}
+library(forecast) # For the ggAcf() function
+ggAcf(x_95) + theme_bw() + 
+  geom_function(fun = function(x) exp(x*log(0.95)), color = "#11DD33")
+```
+
+The values we extract from the sample are not exactly those predicted
+from the model. This comes from size of the sample, which is too small.
+As it increases, we would obtain a perfect fit (you can try!).
+
+### ARCH models
+
+In practice simple autoregressive models can be too limited because some
+variables are not exactly stationary. To illustrate this statement,
+let's have a look at a volatility index, the
+[**VIX**](https://www.cboe.com/tradable_products/vix/).
+
+**NOTE**: usually, the volatility is the standard deviation of past
+returns. The VIX is slightly different, as it is based on
+forward-looking option prices. Still, it is linked (empirically) to the
+traditional volatility.
+
+```{r, message = F, warning = F}
+library(quantmod)
+library(highcharter)
+min_date <- "1998-01-01"                 # Starting date
+max_date <- "2024-03-27"                 # Ending date
+getSymbols("^VIX", src = 'yahoo',        # The data comes from Yahoo Finance
+           from = min_date,              # Start date
+           to = max_date,                # End date
+           auto.assign = TRUE, 
+           warnings = FALSE)
+VIX <- VIX |> as.data.frame() |>
+  rownames_to_column("date") |>
+  mutate(date = as.Date(date))
+head(VIX,7)                                   # Have a look at the result!
+
+vix_chart <- VIX |> select(VIX.Close)
+rownames(vix_chart) <- VIX |> pull(date)
+highchart(type = "stock") %>%
+    hc_title(text = "Evolution of the VIX") %>%
+    hc_add_series(as.xts(vix_chart)) %>%
+    hc_tooltip(pointFormat = '{point.y:.3f}') 
+```
+
+Hence, we see that the series exhibits some moments of extreme activity
+and its distribution is not the same through time. This is referred to
+as "*clusters of volatility*".
+
+Therefore, we also need to introduce models that allow for this type of
+feature. In 1982, Robert Engle proposed such a model, called
+[**ARCH**](https://www.jstor.org/stable/1912773), which was generalized
+in 1986 to
+[**GARCH**](https://www.sciencedirect.com/science/article/abs/pii/0304407686900631)
+models. As we show below, there is a direct link with auto-regressive
+processes!
+
+The idea is to work with the innovations, $e_t$ and to specify them a
+bit differently, i.e., like this: $e_t=\sigma_t z_t$, where $\sigma_t$
+is going to be a changing standard deviation and $z_t$ is a simple white
+noise. What matters is that the vol term is modelled as
+$$\sigma^2_t = a+\sum_{j=1}^pd_j\sigma^2_{t-j} + \sum_{k=1}^qb_ke^2_{t-k},$$
+hence, the value of $\sigma_t^2$ depends both on its past and on the
+past of squared innovations.
+
+## References
+
+### For time-series
+
+There many resources available online. We single out two below:
+
+-   [Forecasting: Principles and Practice](https://otexts.com/fpp3/)\
+-   [Analysis of Financial Time
+    Series](https://perhuaman.files.wordpress.com/2014/09/analysis-of-financial-time-series-2nd-edition.pdf)
+
+### For cryptocurrencies
+
+-   [A Short Introduction to the World of
+    Cryptocurrencies](https://files.stlouisfed.org/files/htdocs/publications/review/2018/01/10/a-short-introduction-to-the-world-of-cryptocurrencies.pdf)\
+-   [Introduction to Cryptography and
+    Cryptocurrencies](https://assets.press.princeton.edu/chapters/s10908.pdf)\
+-   [Investing in
+    Cryptocurrency](https://advisor.morganstanley.com/perrone-wealth-management-group/documents/field/p/pe/perrone-wealth-management-group/Investing_in_Cryptocurrency.pdf)
+    (Morgan Stanley)
+
+# Application to cryptocurrencies
+
+For simplicity, we will work with **daily** data. Higher frequencies can
+be obtained outside the crypto space via the [highfrequency
+package](https://cran.r-project.org/web/packages/highfrequency/index.html).
+Or playing with dedicated APIs (e.g. with packages:
+[binance](https://cran.r-project.org/web/packages/binancer/index.html)/[coinmarketcap](https://cran.r-project.org/web/packages/coinmarketcapr/readme/README.html)).
+
+## Fetching data
+
+We will use the **crypto2** package below. If need be: install it.
+
+```{r, message = F, warning = F}
+library(crypto2)
+```
+
+First, let's have a look at the list of available coins... which are
+numerous!
+
+```{r, message = F, warning = F}
+coins <- crypto_list() 
+```
+
+You can have a look at the info for the coins via the commented code
+below.
+
+```{r, message = F, warning = F}
+c_info <- crypto_info(coin_list = coins, limit = 30)
+```
+
+Next, we can download historical quotes.
+
+```{r, message = F, warning = F}
+coin_symb <- c("BTC", "ETH", "USDT", "BNB", "USDC", "XRP")
+coin_hist <- crypto_history(coins |> filter(symbol %in% coin_symb),
+                            start_date = "20170101",
+                            end_date = "20240325")
+coin_hist <- coin_hist |>  # Timestamps are at midnight, hence we add a day.
+  mutate(date = 1 + as.Date(as.POSIXct(timestamp, origin="1970-01-01")))
+```
+
+And plot them. **NOTE**: mind the log-scale for the *y*-axis.\
+Also, we use [**plotly**](https://plotly.com/graphing-libraries/) below
+for a better experience.
+
+```{r, message = F, warning = F}
+library(plotly)
+g <- coin_hist |>
+  ggplot(aes(x = date, y = close, color = name)) + geom_line() +
+  scale_y_log10() + theme_bw() + xlab("")
+ggplotly(g)
+```
+
+Now, the problem with some of these series is that they are **NOT**
+stationary. At the beginning of the sample, their values are much lower
+to those at th end of the sample. This is one of the reasons why in
+finance, we look at **returns**: $$r_t=\frac{p_t-p_{t-1}}{p_{t-1}},$$
+which are simply relative price changes.\
+Let's compute them below. We recall that prices are gathered in the
+**close** column.
+
+```{r}
+coin_hist <- coin_hist |> 
+  group_by(name) |>
+  mutate(return = close / lag(close) - 1 )
+```
+
+And have a look at their distributions.
+
+```{r, message = F, warning = F, fig.width = 8}
+coin_hist |>
+  ggplot(aes(x = return, fill = name)) + geom_histogram() +
+  facet_wrap(vars(name), scales = "free") + theme_bw() +
+  theme(axis.title = element_blank())
+```
+
+There seem to be **outliers** (to the left or right of the most common
+values)!
+
+## Estimations
+
+Ok, so now let's try to link what we have seen in the theoretical part
+with the data. This step is called **estimation**. Basically, if we
+think that the data follows $x_t=bx_{t-1}+e_t$, we need to find $b$!
+
+## Returns
+
+First, let's have a look a autocorrelograms (of returns).
+
+```{r, fig.width=8}
+crypto_acf <-
+  coin_hist |> 
+  na.omit() %>%
+  split(.$name) %>% 
+  map(~acf(.$return, plot = F)) %>% 
+  map_dfr(
+    ~data.frame(lag = .$lag, 
+                acf = .$acf,
+                ci = qnorm(0.975)/sqrt(.$n.used)
+    ), .id = "name") 
+crypto_acf |> 
+  filter(lag > 0, lag < 6) |>
+  ggplot(aes(x = lag, y = acf, fill = name)) + 
+  geom_col(position = "dodge") + theme_bw()
+```
+
+But recall that some of the coins are **stable**!\
+Overall, however, there does not seem to be a strong memory pattern.
+Hence, daily returns appear to be mostly **white noise**.
+
+## Realized volatility
+
+Then, let's have a look at volatility. It's measured as
+
+$$v_t=\sqrt{\frac{1}{T-1}\sum_{s=1}^T(r_{t-s}-\bar{r})^2},$$ where
+$\bar{r}$ is the mean return in the sample of $T$ observations. Below,
+we use an optimized (C++-based function) to compute it via rolling
+standard deviation over 20 days.
+
+```{r}
+library(RcppRoll)
+coin_hist <- coin_hist |>
+  group_by(name) |>
+  na.omit() |>
+  mutate(real_vol_20 = roll_sd(return, n = 20, fill = NA, na.rm = T))
+```
+
+```{r, message = F}
+coin_hist |>
+  filter(name == "Bitcoin") |>
+  pivot_longer(all_of(c("close", "real_vol_20")), names_to = "series", values_to = "value") |>
+  ggplot(aes(x = date, y = value, color = series)) + geom_line() + theme_bw() +
+  facet_wrap(vars(series), nrow = 2, scales = "free")# + scale_y_log10()
+```
+
+Now let's have a look a the autocorrelation of the volatility: it's
+highly persistent.
+
+```{r}
+crypto_acf <- coin_hist |> 
+  na.omit() %>%
+  split(.$name) %>% 
+  map(~acf(.$real_vol_20, plot = F)) %>% 
+  map_dfr(
+    ~data.frame(lag = .$lag, 
+                acf = .$acf,
+                ci = qnorm(0.975)/sqrt(.$n.used)
+    ), .id = "name") 
+crypto_acf |> 
+  filter(lag > 0, lag < 15) |>
+  ggplot(aes(x = lag, y = acf, fill = name)) + 
+  geom_col(position = "dodge", alpha = 0.8) + theme_bw() +
+  scale_fill_viridis_d(option = "magma", end = 0.9, begin = 0.1)
+```
+
+The decay is slow, but there is heterogeneity between volatile coins
+(BTC, ETH) and stable coins (Tether, USD Coin).
+
+## GARCH estimation
+
+There are many packages for GARCH estimation. We propose two:
+[**ruGARCH**](https://cran.r-project.org/web/packages/rugarch/index.html)
+and
+[**fGARCH**](https://cran.r-project.org/web/packages/fGarch/index.html).
+
+```{r, message = F, warning = F}
+library(rugarch)
+library(fGarch)
+```
+
+In **fGARCH**, the model is:
+
+$$s_t = \omega + \alpha e_{t-1} + \beta s_{t-1}.$$ In the output, there
+are some additional parameters that allow to propose a more general
+model:
+
+-   **shape** is the shape parameter of the conditional distribution.\
+-   **skew** is the skewness parameter of the conditional distribution.\
+-   **delta** a numeric value, the exponent delta of the variance
+    recursion.
+
+```{r}
+garchFit(formula = ~garch(1,1), 
+         data = coin_hist |> 
+           filter(name == "Bitcoin") |> 
+           pull(return)) 
+```
+
+Now, with **rugarch**...
+
+```{r}
+spec <- ugarchspec()
+ugarchfit(data = coin_hist |> 
+            filter(name == "Bitcoin") |> 
+            na.omit() |>
+            pull(return), 
+          spec = spec)@fit$coef
+```
+
+The results are not exactly the same! mu and omega are close...\
+We recall the model below
+$$s_t = \omega + \alpha e_{t-1} + \beta s_{t-1}.$$ ar1 is the
+autocorrelation coefficient, hence $\beta$ and ma1 is $\alpha$.
+
+## Forecasting
+
+Of course, when it comes to cryptos, one of the most interesting (and
+hardest) topic is **prediction**. To show how tough this is, we will
+rely on the [**fable**](http://fable.tidyverts.org/index.html) package.\
+It's highly integrated and performs many analyses automatically. Below,
+we use an ARIMA model for the forecast, see the reference for the
+parameters: https://fable.tidyverts.org/reference/ARIMA.html Beyond
+ARIMA, the [methods](https://fable.tidyverts.org/reference/index.html)
+available are **ETS** ([exponential smoothing state
+space](https://otexts.com/fpp2/ses.html)), **TSLM** (time-series linear
+model, $y_t=a+bx_t$), **NNETAR** (neural network autoregression,
+$y_t=f(y_{t-1})$).
+
+Below, we leave the function pick the optimal orders via the function
+**pdq**(). But orders can be specified (see below).
+
+```{r, message = F, warning = F}
+library(fable)
+library(tsibble)
+library(feasts)
+coin_hist |>
+  na.omit() |>
+  filter(symbol == "ETH") |>
+  tsibble(index = date) |>
+  model(
+    arima = ARIMA(return ~ 1 + pdq()),
+    snaive = SNAIVE(return)
+  ) |>
+  forecast(h = 15) |>
+  autoplot() + theme_bw() + facet_grid(vars(.model))
+```
+
+Let's have a look at the estimated coefficients from models.
+
+```{r}
+coin_hist |>
+  na.omit() |>
+  filter(symbol == "ETH") |>
+  tsibble(index = date) |>
+  model(
+    arima = ARIMA(return ~ 1 + pdq()),
+    snaive = SNAIVE(return)
+  ) |>
+  coef()
+```
+
+Note: **sar** is an auto-regressive component with **seasonality**.\
+We can specify a particular set of orders p, d and q.
+
+```{r}
+coin_hist |>
+  na.omit() |>
+  filter(symbol == "ETH") |>
+  tsibble(index = date) |>
+  model(
+    arima = ARIMA(return ~ 1 + pdq(1,0,1)),
+    snaive = SNAIVE(return)
+  ) |>
+  coef()
+```
+
+## Prediction with LSTM (RNN)
+
+First, because we are using an M1 Mac, we must resort to a trick to make
+tensorflow work. See the [following
+post](https://github.com/rstudio/tensorflow/issues/559#issuecomment-1460226364)
+if you are also on a recent Mac.\
+We also build the time-series from which to learn.
+
+```{r, message = F, warning = F}
+library(reticulate)
+# use_condaenv("r-tensorflow") # This is for M1 Macs with special conda environment
+library(TSLSTM)
+
+data_coin <- coin_hist |> 
+  select(timestamp, symbol, close, volume) |>
+  filter(symbol %in% c("BTC", "ETH")) |>
+  group_by(symbol) |>
+  mutate(date = as.Date(timestamp),
+         return = close / lag(close) - 1,
+         vol_change = volume / lag(volume) - 1) |>
+  ungroup() |>
+  select(date, symbol, return, vol_change) |>
+  pivot_wider(names_from = "symbol", values_from = c("return", "vol_change")) |>
+  mutate(return_ETH = lead(return_ETH)) |> # We forward the ETH return, as we want to predict it
+  na.omit()
+
+train_coin <- data_coin |> filter(date < "2022-06-30")
+test_coin <- data_coin |> filter(date > "2022-06-30")
+```
+
+The idea is to predict ETH return with past BTC return, past ETH volume
+change and past BTC volume change.
+```{r}
+library(keras)
+# install_keras()
+```
+
+```{r}
+library(tensorflow)
+# install_tensorflow()
+```
+
+```{r, message = F, waning = F}
+model_rnn <- keras_model_sequential() %>% 
+  layer_gru(units = 9,                                     # Nb units in hidden layer
+            batch_input_shape = c(1, nrow(train_coin), 3), # Dimensions = tricky part!
+            activation = 'tanh',                           # Activation function
+            return_sequences = TRUE) %>%                   # Return all the sequence
+  layer_dense(units = 1)                                   # Final aggregation layer
+model_rnn %>% compile(
+  loss = 'mean_squared_error',                             # Loss = quadratic
+  optimizer = optimizer_rmsprop(),                         # Backprop
+  metrics = c('mean_absolute_error')                       # Output metric MAE
+)
+```
+
+Onto training!
+
+```{r, message = F, warning = F}
+fit_rnn <- model_rnn %>% 
+  fit(x = train_coin |>                                           # Training features   
+        select(return_BTC, vol_change_BTC, vol_change_ETH) |> 
+        data.matrix() |>
+        array(dim = c(1, nrow(train_coin), 3)),        
+      y = train_coin |> pull(return_ETH) |> 
+        array(dim  = c(1,nrow(train_coin))),                      # Training labels
+      epochs = 9,                                                 # Number of rounds
+      batch_size = 1 ,                                            # Length of sequences
+      verbose = 0)                                                # No comments
+plot(fit_rnn) + theme_bw() + geom_point(color = "black") + geom_line()
+```
+
+Now, unfortunately, we cannot use the fitted model as such because the
+dimensions between the training and testing sets are not the same. We
+have to create a new model and import the old model's weights...
+
+```{r, message = F, warning = F}
+new_model <- keras_model_sequential() %>% 
+  layer_gru(units = 9, 
+            batch_input_shape = c(1,              # New dimensions
+                                  nrow(test_coin), 
+                                  3), 
+            activation = 'tanh',                      # Activation function
+            return_sequences = TRUE) %>%              # Return the full sequence
+  layer_dense(units = 1)                              # Output dimension
+new_model %>% keras::set_weights(keras::get_weights(model_rnn))
+```
+
+We are now ready.
+
+```{r, message = F, warning = F}
+preds_rnn <- predict(new_model, 
+        test_coin |> 
+          select(return_BTC, vol_change_BTC, vol_change_ETH) |> 
+          data.matrix() |>
+          array(dim = c(1, nrow(test_coin), 3)))
+mean(abs(preds_rnn - test_coin |> pull(return_ETH) ))
+```
+
+Note: the result, because of the randomization of weights, is also
+**random**.\
+To be compared with the training metric...
+
+```{r}
+
+```

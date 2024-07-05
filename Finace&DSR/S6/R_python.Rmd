@@ -1,0 +1,136 @@
+---
+title: "R - Python interoperability"
+output:
+  html_document:
+    df_print: paged
+---
+
+This notebook shows how to combine R & Python via the `{reticulate}` package.\
+This will require an installation of Python.
+
+```{r, message = F, warning = F}
+if(!require(reticulate)){install.packages("reticulate")}
+library(tidyverse)
+library(reticulate)
+```
+
+The reticulate package allows to manipulate objects in both languages:\
+- if py_data is a Python object, you can access it in an R chunk via py\$py_data\
+- if r_data is an R object, you can access it in a Python chunk via r.r_data
+
+# Pure python first
+
+To install/uninstall python modules, it is possible to proceed in R...
+
+```{r}
+#reticulate::conda_remove('r-reticulate', packages = c('numpy'))
+#py_install("numpy")     # if you need to install python modules
+#py_install("matplotlib")
+#py_install("seaborn")
+```
+
+or in Python. Sometimes, you have to test both to make things work (module versioning conflicts, etc.).
+
+```{python}
+# Operates in /Users/coqueret/Library/r-miniconda-arm64/envs/r-reticulate/lib/python3.8/site-packages/
+# !pip uninstall pandas -y
+# !pip uninstall numpy -y
+# !pip install numpy==1.24.2
+# !pip install matplotlib
+# !pip install pandas
+# !pip install seaborn
+# !pip uninstall six -y
+# !pip install six==1.15.0
+```
+
+We fetch data from the Berkeley Earth organization (the NASA website is not 100% reliable strangely).
+
+```{python, message = F, warning = F}
+import pandas as pd                      # This library is for data wrangling
+import numpy as np                       # Basic math library
+import seaborn as sns                    # This is one library for plotting
+import matplotlib.pyplot as plt          # Yet another library for visualization
+#url = 'https://data.giss.nasa.gov/gistemp/graphs/graph_data/Global_Mean_Estimates_based_on_Land_and_Ocean_Data/graph.txt'
+url = 'https://berkeley-earth-temperature.s3.us-west-1.amazonaws.com/Global/Land_and_Ocean_complete.txt'
+data_temp = pd.read_csv(url, skiprows = 84, nrows = 2088, sep='\r\t', engine='python')  
+data_temp = data_temp.iloc[0:,0].str.split(expand = True)
+data_temp = data_temp.rename(columns = {0: 'Year', 1: 'Month', 2: 'Anomaly', 3: 'Uncertainty', 4: 'Ann_anomaly'})
+data_temp = data_temp[['Year', 'Month', 'Anomaly', 'Uncertainty', 'Ann_anomaly']]         # Keep only 3 columns
+data_temp = data_temp.query('Ann_anomaly != "NaN"') 
+data_temp['Anomaly'] = pd.to_numeric(data_temp['Anomaly'])                                # Translate to number
+data_temp['Uncertainty'] = pd.to_numeric(data_temp['Uncertainty'])                        # Translate to number
+data_temp['Ann_anomaly'] = pd.to_numeric(data_temp['Ann_anomaly'])                        # Translate to number
+data_temp['Date'] = data_temp['Year'].astype(str) + data_temp['Month'].astype(str) + '15' # Create date
+data_temp['Date'] = pd.to_datetime(data_temp['Date'], format = '%Y%m%d')
+data_temp
+```
+
+```{python}
+plt.clf()
+plt.plot(data_temp.Date, data_temp.Anomaly, label = "Temperature")
+plt.plot(data_temp.Date, data_temp.Ann_anomaly, label = "Ann_anomaly")
+plt.legend()
+plt.show()
+plt.rcParams["figure.figsize"]=(10, 6)
+```
+
+# Recycling python dataframes to use them in R
+
+```{r}
+df <- py$data_temp
+df %>% ggplot(aes(x = Date, y = Ann_anomaly)) + geom_line() + theme_bw()
+```
+
+# Starting from R
+
+Now we do the opposite: we start from R.
+
+```{r}
+library(gapminder)
+data("gapminder")
+force(gapminder)  # this step loads the data in the environment
+```
+
+Now let's switch to python! To access the R dataframe, we simply refer to "r.gapminder":
+
+```{python}
+pd.pivot_table(r.gapminder, values = 'pop', index = 'continent', aggfunc=np.sum).reset_index()
+```
+
+```{python}
+pt = pd.pivot_table(r.gapminder, 
+                    values = 'lifeExp', 
+                    index = ['continent','year'], 
+                    aggfunc=np.mean).reset_index()
+pt
+```
+
+```{python}
+#plt.clf()
+sns.lineplot(data = pt, 
+             x = "year", 
+             y = "lifeExp",
+             hue = 'continent')
+#plt.show()
+```
+
+```{python}
+import plotly.express as px
+fig = px.line(pt, 
+              x="year", 
+              y="lifeExp", 
+              color ='continent', 
+              title='Life expectancy dynamics')
+fig.show()
+```
+
+```{r}
+pip install tensorflow
+pip install keras
+
+library(keras)
+install_keras()
+
+library(tensorflow)
+install_tensorflow()
+```

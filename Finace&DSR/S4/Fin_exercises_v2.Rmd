@@ -1,0 +1,384 @@
+---
+title: "Financial Data Science Exercises"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+---
+
+*Before we start: Please work with notebooks (.Rmd or .qmd) for your **projects** and knit or render them in HTML!*
+
+```{r}
+library(tidyverse)
+library(plotly)
+```
+
+**IMPORTANT NOTE**: the tasks are **sequential**. Consequently, PART II must be done after PART I, etc. New columns are progressively added to the dataset.
+
+## DATA
+
+The data (file *data.RData*) consists of monthly financial information pertaining to 30 large US firms. They are characterised by their ticker:
+
+| A - F                     | G - M                       | O - Z                     |
+|--------------------|--------------------------------|--------------------|
+| **AAPL** (Apple)          | **GE** (General Electric)   | **ORCL** (Oracle)         |
+| **BA** (Boeing)           | **HD** (Home Depot)         | **PFE** (Pfizer)          |
+| **BAC** (Bank of America) | **IBM**                     | **PG** (Procter & Gamble) |
+| **C** (Citigroup)         | **INTC** (Intel)            | **T** (AT&T)              |
+| **CSCO** (Cisco)          | **JNJ** (Johnson & Johnson) | **UNH** (United Health)   |
+| **CVS** (CVS Health)      | **JPM** (JP Morgan)         | **UPS**                   |
+| **CVX** (Chevron)         | **K** (Kellogg)             | **VZ** (Verizon)          |
+| **D** (Dominion Energy)   | **MCK** (McKesson)          | **WFC** (Wells Fargo)     |
+| **DIS** (Disney)          | **MRK** (Merck)             | **WMT** (Walmart)         |
+| **F** (Ford)              | **MSFT** (Microsoft)        | **XOM** (Exxon)           |
+
+There are 7 attributes:\
+- closing price (**Close**),\
+- past (realized) 1 month volatility (**Vol_1M**),\
+- market capitalisation in M\$ (**Mkt_Cap**),\
+- price-to-book ratio (**P2B**),\
+- debt-to-equity (**D2E**),\
+- profitability margin (**Prof_Margin**),\
+- ESG ranking (**ESG_rank** from Sustainalytics, in %).
+
+Finally, the time range is end of 1999 to beginning of 2021.
+
+------------------------------------------------------------------------
+
+## PART I: GRAPHS
+
+We start by exploring the dataset (visually) with some **simple plots**.
+
+0)  Load the data ('data.RData') and the *tidyverse* package.
+1)  First, take a look at the data using the head() function and then the summary() function.
+2)  Plot (with a line) the price of the Microsoft (MSFT) share through time (this requires a filter first).
+3)  Plot (with a line) the price of Apple (AAPL), IBM and Microsoft with one color for each company.\
+    Obviously, there is a scale problem: we'll try to solve it in the next section.
+
+```{r UP TO YOU! 1, message = FALSE, warning = FALSE}
+load("data.RData")
+head(data)
+summary(data)
+data %>%
+  filter(Tick %in% c("MSFT")) %>%
+  ggplot(aes(x=Date, y=Close)) + 
+  geom_line()
+
+data %>%
+  filter(Tick %in% c("AAPL", "IBM", "MSFT")) %>%
+  ggplot(aes(x = Date, y=Close, fill = Tick)) + 
+  geom_line()
+
+```
+
+------------------------------------------------------------------------
+
+## PART II: DATA WRANGLING
+
+### Simple filters
+
+1)  Filter the data to keep only IBM figures.
+2)  Filter the data to keep only year 2018.
+3)  Do both at the same time.
+
+```{r UP TO YOU! 2}
+data %>%
+  filter(Tick %in% c("IBM") & year(Date) == "2018")
+```
+
+### Modifying data: normalised prices
+
+*The aim of this subsection is to add a new column to the "data" dataframe. This column would be equal to stock prices that are normalised to one on the first date. This makes graphical comparison across firms easier. This could be done with a loop - which would be ugly. We proceed otherwise for pedagogical purposes: use the --tidyverse!--*
+
+1)  From the dataset, group according to firm names (Tick) and create a new column with **mutate**(), called "*First_price*" which is the first value of the column "*Close*". Remember, indexing is simple; v[1] is the first value of vector v.\
+2)  Finally, create a new *New_close* column (normalised close price), which is the Close divided by First_price.\
+3)  Plot (with a line) the *New_close* values of Apple, IBM and Microsoft (MSFT) with one color for each company.
+4)  Add a scale_y_log10() to reduce discrepancies.
+
+```{r UP TO YOU! 3}
+data %>%
+  group_by(Tick) %>%
+  mutate(First_price = Close[1],
+         New_closed = Close / First_price) %>%
+  filter(Tick %in% c("MSFT", "IBM", "AAPL")) %>%
+  ggplot(aes(x=Date, y=New_closed, color=Tick)) + geom_line() + theme_classic()
+```
+
+This gives a better idea of the remarkable performance of Apple during the \~22 years of the sample.
+
+### Modifying data: computing **returns**
+
+1)  The lag() function is very useful (test this: lag(1:12)). Combining *group_by*() with *mutate*() and *lag*(), create a new column that yields the monthly **Return** of the stocks. **Save** the output because we will need the **Return** column a lot.
+2)  Select only 3 columns: Tick, Date and return.
+3)  With pivot_wider(), create a *wide* version of the returns (i.e. in matrix form), so that each stock return (stock-by-stock) is in a column and each row is a date.\
+
+```{r}
+head(data)
+```
+
+```{r returns}
+data <- data |>
+  group_by(Tick) |>
+  mutate(Return = Close / lag(Close) -1) |>
+  ungroup()
+
+data |>
+  filter(Tick %in% c("MSFT", "IBM", "AAPL")) |>
+  ggplot(aes(x = Date, y=Return, color = Tick)) + geom_line()
+  
+```
+
+Thanks to the grouping, the formula inside **mutate**() is applied sequentially stock-by-stock!\
+Don't forget to ungroup()!
+
+### Correlation matrix!
+
+The aim here is to compute the **correlation matrix** of all stocks in the sample.
+
+Starting from the output of the previous exercise (continue piping %\>%):\
+1) Remove the date column and transform the output in a matrix with the function *as.matrix*().\
+2) From this, compute the covariance matrix of the first 14 stocks (in alphabetical order). Because of the NAs, you will need the option (argument) use = "complete.obs" in the cor() function.
+
+```{r}
+data |>
+  select(Date, Tick, Return) %>%
+  pivot_wider(names_from = Tick, values_from=Return) |>
+  select(-Date) %>%
+  na.omit() |> # Drop_NA
+  cor()
+```
+
+**Trick**: you can use the *corrplot* or *ggcorrplot* package to visualize this. But you would need to install them first!
+
+```{r correlation}
+if(!require(ggcorrplot)){install.packages("ggcorrplot")} # Below, we visualise the correlation matrix using the ggcorrplot package
+library(ggcorrplot)
+```
+
+```{r, fig.width=10, warning=FALSE}
+library(ggcorrplot)
+data |>
+  select(Date, Tick, Return) %>%
+  pivot_wider(names_from = Tick, values_from=Return) |>
+  select(-Date) %>%
+  na.omit() |> # Drop_NA
+  cor() |>
+  ggcorrplot(hc.order = TRUE) + #层次聚类
+  scale_fill_viridis_c(direction = -1)
+```
+
+Visually, the largest correlations are between **Citigroup** and **Bank of America** and between **Chevron** and **Exxon**, which highlights the importance of the sector for asset co-movements.
+
+------------------------------------------------------------------------
+
+## PART III: PIVOT TABLES
+
+0)  First, we are (again) going to augment the database by adding a **Year** column. The code requires the *lubridate* package (in the tidyverse)
+
+```{r date, message = FALSE, warning = FALSE}
+data <- data %>% mutate(Year = year(Date)) # Adding a Year column for yearly statistics.
+data
+```
+
+1)  Group the data by company and by year and create a new variable **Avg_Cap** which computes the average market capitalization.\
+2)  Plot (with a line) the corresponding results: x-axis is **Year**, y-axis is **Avg_Cap** with one color for each firm. =\> Hard to read. Beyond 10 firms, the graph becomes less insightful. Try to do the same with a barplot (via *geom_col*()).
+3)  Pick one year (e.g., 2005) and show the average capitalization of firms in decreasing order.
+4)  From data, create a pivot table (call it pt for instance) that computes the average capitalization, average P2B and average return for each firm. Hint: for returns, there are some NAs, so use the argument na.rm = T in the mean().\
+5)  From this outcome use a geom_col to show the average cap of firms.
+
+```{r UP TO YOU! 5, message = F, warning = F}
+g <- data %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Tick, Year) %>%
+  summarise(Avg_Cap = mean(Mkt_Cap)) %>%
+  ggplot(aes(x=Year, y=Avg_Cap, fill = Tick)) +
+    geom_col()
+ggplotly(g)
+```
+
+```{r}
+data %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Tick, Year) %>%
+  summarise(Avg_Cap = mean(Mkt_Cap)) %>%
+  filter(Year == 2015) %>%
+  arrange(desc(Avg_Cap))
+```
+
+```{r}
+data %>%
+  group_by(Tick) |>
+  summarise(avg_cap = mean(Mkt_Cap),
+            avg_p2b = mean(P2B, na.rm = T),
+            avg_ret = mean(Return, na.rm = T)) %>%
+  ggplot(aes(y=reorder(Tick, avg_cap), x = avg_cap, fill = avg_cap)) +
+  geom_col(alpha = .7) +
+  scale_fill_viridis_c(direction = 1) + theme_classic() +
+  theme(legend.position = "none") + ylab("") + xlab("Average market capitalization")
+```
+
+------------------------------------------------------------------------
+
+## PART IV: FACTOR ANALYSIS
+
+Research in financial economics has shown that firms' *characteristics* are likely to drive *profitability*. We try to investigate this idea below.\
+1) Using data, plot (in a scatter plot, i.e., with points) y = Returns versus x = Mkt_Cap, & add a geom_smooth() layer.\
+2) Same exercise but with *pt* (the pivot table from PART III), with x = Avg_Cap and y = Avg_Ret. You can use ggplotly() or a geom_text_repel() to characterize the points.\
+3) Same exercise as 2), but after removing AAPL from the sample. Add a geom_smooth() layer.\
+4) From pt, plot x = Avg_P2B and y = Avg_ret. Comment?
+
+```{r UP TO YOU! 6, warning = FALSE, message = FALSE}
+library(ggrepel)
+
+data |>
+  select(Date, Tick, Return) %>%
+  pivot_wider(names_from = Tick, values_from = Return) |>
+  select(-Date) %>%
+  na.omit()
+
+```
+
+In the last graph, there is an outlier for the average P2B: error in the data? Further investigation would show that in 2017, the book value of Boeing was very small and hence its P2B ratio was extremely high: this is revealed via the global average.\
+In the above graphs (omitting AAPL), we see the mild negative relationship between firm size and average return. Though our sample is much too small and our study not rigourous, this resembles the so-called size effect according to which small firms are more profitable than large firms (though not in financial *bad times*).
+
+------------------------------------------------------------------------
+
+## PART V: LOOPS & FUNCTIONS
+
+"*For*" loops in R work like that:
+
+for(x in vector){\
+do stuff\
+}
+
+```{r Fibonacci}
+a <- c(1,2)
+n <- 12
+for(i in 3:n){
+  a[i] <- a[i-1] + a[i-2]
+}
+a
+```
+
+Now, let's take a vector of dates, many ways to do that:
+
+```{r}
+dates <- data$Date %>% 
+  as.factor() %>% 
+  levels() %>%
+  as.Date()       # Creating a vector of dates.
+dates <- data %>% 
+  filter(Tick == "AAPL") %>% 
+  select(Date) %>% 
+  as.matrix() %>% # This is to get rid of the dataframe structure to avoid column numbers 
+  as.Date()       # Similar though not exactly the same result
+dates <- data$Date %>% unique() %>% sort()
+```
+
+Initialize a variable to zero (you may call it *Agg_Cap*, for aggregate capitalization).\
+Then, create a loop over all dates that computes the aggregate market capitalization summed across all 30 firms at each date (update the variable Agg_Cap: this is a proxy for a market portfolio like the Dow Jones or the S&P500). Plot the corresponding series. It shows the periods of *market turbulence*.\
+**Note**: this is a very inefficient way to do this.
+
+```{r UP TO YOU! 7}
+
+```
+
+Now a bit on functions. The syntax is:
+
+```{r}
+function_name <- function(argument_1, argument_2){
+   z <- argument_1 * argument_2
+   return(z)
+}
+
+function_name(6,7) # WOW we coded the simple product!
+```
+
+## PART VI: PLOTTING THE MARKOWITZ CLOUD
+
+We can represent the risk-return relationship in the **plane** (Harry Markowitz had a **Nobel prize** for this idea):
+
+![](https://upload.wikimedia.org/wikipedia/en/0/01/Markowitz_frontier.svg)
+
+Before we start, a word on the *apply* function. It allows to perform operations on rows (first dimension) or columns (second dimension). We show one example below:
+
+```{r}
+m <- matrix(1:9, nrow = 3) # Sample matrix
+m
+apply(m, 1, sum) # Sum on rows, dim = 1
+apply(m, 2, sum) # Sum on columns, dim = 2
+apply(m, 2, max) # Maximum of columns
+```
+
+This is super cool! It's a first step towards **functional programming**...
+
+1)  Create a returns variable/object with only ticks, dates and returns (use select() and pivot_wider()). You can recycle the code from **Part III**.\
+2)  Use the na.omit() function to remove missing returns in data.\
+3)  Using apply, compute the *average (mean)* and *standard deviation* of the columns of this matrix. Save the output into a dataframe or tibble with 3 columns: Tick, avg_return, vol.\
+4)  From this dataframe/tibble, plot the values on a graph and use ggrepel to annotate (the Tick values).
+
+```{r r UP TO YOU! 8}
+
+```
+
+You can have a look at the **fPortfolio** package if you want to plot the corresponding efficient frontier. Or do it manually: <https://rpubs.com/jvaldeleon/eff_fron_r>
+
+**portfolioAnalytics** is also a great package for portfolio construction.
+
+## PART VII: REGRESSIONS & BETAS
+
+Regressions are run as:
+
+```{r}
+y <- rnorm(50)                    # Some random series
+x <- rexp(50)                     # Another series
+data_reg <- data.frame(y,x)
+fit <- lm(y ~ x, data = data_reg) # Here is the regression!
+summary(fit)
+```
+
+What matters (most?) is the coefficients which can be accessed via:
+
+```{r}
+summary(fit)$coef
+```
+
+You can also use the great **broom** package: <https://cran.r-project.org/web/packages/broom/vignettes/broom.html>
+
+1)  First, create a market return, which is the average return of all firms, weighted proportionally according to market cap. To do so combine **group_by** and **mutate**! The formula is: sum(Return \* Mkt_Cap) / sum(Mkt_Cap)\
+    Usually, group_by() is combined with summarize(), but it's also super powerful with mutate()!\
+    The advantage of mutate in this case is that it keeps all rows in the data.
+
+2)  Compute the betas of all stocks! You can create a dedicated function that computes the beta... (**HARD**)\
+
+3)  Plot them via a geom_col.\
+
+4)  You can check that, roughly, on average, the beta is equal to one.
+
+```{r r UP TO YOU! 9}
+if(!require(viridis)){install.packages("viridis")} # If you want to change color palettte
+library(viridis)
+
+```
+
+------------------------------------------------------------------------
+
+## PART IX: SUSTAINABLE INVESTING
+
+We end this session with a focus on a topic which is both important gaining traction: **sustainable investing**. Investor are more and more concerned about the impact & footprint of their portfolio holdings. In our dataset, we have an *ESG_rank* column which represents the ranking score of firms calculated by the firm *Sustainalytics*, on a scale from 0 to 100. We can thus use it for some new computations. However, it is only available from February 2014 onwards. A key question is: whether we pay a financial cost for investing in "**green**" firm.
+
+1)  Filter the data to keep only points for the *AAPL* and *MSFT* ticker and for dates **after 2014**. Plot the corresponding *ESG_rank* through time.
+2)  Filter the data to keep only points after 2014. Then, create a pivot-table that computes *i)* the average return of firms, along with *ii)* their average ESG rank.\
+3)  Plot the corresponding points with a scatterplot (with ESG as the x-axis). Use a geom_smooth to detect a trend. Conclusion, on this small sample?\
+4)  **BONUS**: is there a relationship between ESG score and firm size (Mkt_Cap)? You can plot individual points or aggregate values (via a pivot table).
+
+```{r r UP TO YOU! 10}
+
+```
+
+```{r}
+
+```

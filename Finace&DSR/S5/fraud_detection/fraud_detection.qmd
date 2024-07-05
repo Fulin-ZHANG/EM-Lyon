@@ -1,0 +1,510 @@
+---
+title: "Fraud detection"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    page-layout: full
+    df-print: kable
+    theme: cosmo
+    fontsize: 1.0em    
+    embed-resources: true
+---
+
+**WARNING**: this notebook relies on several **R packages**. Whenever one is called (for instance via a call such as "*library(torch)*"), this implies that the package has been installed, e.g., via "*install.packages("torch")*". Hence, make sure the following packages are installed!
+
+```{r}
+# install.packages("tidyverse") 
+# install.packages(c("data.table", "fastDummies", "lightgbm", "reticulate", "keras"))
+```
+
+**NOTE**: <span style="color:#21AB70">in **data science**, one of the most crucial competence is **domain knowledge**.</span>   
+Data is key (more than any algorithm) and domain knowledge helps understand how it is built and which features are likely to matter most.
+
+# Introduction
+
+## Principles
+
+Quite obviously, the purpose of fraud detection is to **identify illicit transactions**.   
+This is usually done via the characteristics of the transaction, which can be split into several categories: the nature of the transaction (e.g., type (credit card versus online), location, timing or amount), and the properties of the parties: history of transactions, location, gender of emitter, trustworthiness of receiver, etc. 
+
+Hence, like for credit risk, the main task will be essentially **classification** (supervised learning), where we use the characteristics of the transactions to predict if they are fraudulent or not. However, with fraud data, the imbalance is even more pronounced, because usually less than 1% of transactions are tagged as fraudulent. This means that most of the interesting information comes from a very small portion of the data!   
+
+Note that fraud is widespread and affects, many domains, especially insurance for instance (see Section 6 of [this paper](https://www.sciencedirect.com/science/article/abs/pii/S1084804516300571) for examples). The tools to detect fraud (or anomalies) in other context are quite similar (supervised learning).
+
+## Short list of **free** references
+
+There are several books available on the topic, but the following one, with code snippets in python is probably the most applied (with PyTorch examples to illustrate neural networks):   
+- [Reproducible Machine Learning for Credit Card Fraud detection - Practical handbook](https://fraud-detection-handbook.github.io/fraud-detection-handbook/Foreword.html)    
+
+Two recent survey articles:   
+
+- [Survey of Credit Card Anomaly and Fraud Detection Using Sampling Techniques](https://www.mdpi.com/2079-9292/11/23/4003/pdf) (2022)    
+- [Financial Fraud: A Review of Anomaly Detection Techniques and Recent Advances](https://www.sciencedirect.com/science/article/pii/S0957417421017164) (2022)    
+
+
+
+
+# Data wrangling
+
+First, let us load the data & the packages.  
+The data originates from a [**Kaggle competition**](https://www.kaggle.com/datasets/kartik2112/fraud-detection) and we only keep the training data for which the target/label is available.  
+The file is also available on this [**drive link**](https://drive.google.com/file/d/152rvWvzXwju1tXJzoIoBkcxt7Zs6TDBM/view?usp=sharing).    
+$\rightarrow$ Please download it and place it in the same folder as the notebook.  
+
+```{r, message = F, warning = F}
+library(tidyverse)
+library(data.table)         # To import csv sheets rapidly
+library(fastDummies)        # For dummies
+library(RhpcBLASctl)        # For multi-threading
+fraud <- fread("fraud.csv")
+head(fraud)
+```
+
+The first three columns probably won't be very useful (this is a shortcut though: time can be predictive, but it would need to be transformed, e.g., into days and hours).  
+The merchant name can also be improved.
+
+```{r}
+fraud <- fraud[, -(1:3)]                 # Removing the first 3 columns (not useful)
+fraud <- fraud |>
+  select(-trans_num, -first, -last) |>   # Remove 3 other columns
+  mutate(merchant = merchant |> str_remove("fraud_"))
+fraud |> head(4)                         # Show first 4 rows
+```
+
+There remains a lot to do... There are too many merchants and cities and for simplicity, we choose to remove them. 
+Instead, we'll keep categories, which we will transform via **one-hot encoding**: each categorical value is coded into a new binary column (see below).    
+In terms of locations, zip is a number but can be misleading, so we'll only keep latitude & longitude.  
+**NOTE**: the one-hot encoding below can *take some time*...
+
+```{r}
+fraud <- fraud |>                        # Below we remove yet other columns
+  select(-merchant, -street, -city, -state, -zip, -dob, -unix_time, -job) |>
+  mutate(gender = gender |> as.factor() |> as.numeric())
+dummy_cat <- dummy_cols(fraud$category)  # One-hot encoding
+fraud <- fraud |>
+  select(-category) |>                   # Removes the "category" column
+  bind_cols(dummy_cat |> select(-1))     # Adds the equivalent dummy columns
+fraud |> head(3)
+```
+
+Before the models, let's evaluate the **imbalance** of the data...
+
+```{r}
+mean(fraud$is_fraud)
+```
+
+0.6% of positive cases: this is very low. Again: a large chunk of the information seems to be contained in a very small fraction of observations...
+
+# A first lightGBM model
+
+## Data splitting
+
+In this section, we fit a boosted tree from the [lightGBM](https://lightgbm.readthedocs.io/en/v3.3.2/R/index.html) package.  
+We split the data in two, for simplicity: we won't use **validation**. 
+
+```{r, message = F, warning = F}
+library(lightgbm)
+fraud_train <- fraud[1:500000,]               
+fraud_test <- fraud[(1+500000):nrow(fraud),]
+# Future validation set:
+fraud_lgb <- lgb.Dataset(fraud_train |> select(-is_fraud) |> as.matrix(), 
+                         label = fraud_train$is_fraud,
+                         free_raw_data = FALSE)
+```
+
+The model parameters. The full list is gathered [here](https://lightgbm.readthedocs.io/en/v3.3.2/Parameters.html).    
+Good tips with regard to parameter tuning are also provided on this [page](https://lightgbm.readthedocs.io/en/v3.3.2/Parameters-Tuning.html).
+
+```{r}
+train_params <- list(
+  num_leaves = 15,        # Max nb leaves in tree
+  learning_rate = 0.1,    # Learning rate
+  objective = "binary",   # Loss function
+  max_depth = 4,          # Max depth of trees
+  min_data_in_leaf = 50,  # Nb points in leaf
+  bagging_fraction = 0.5, # % of observations
+  feature_fraction = 0.7, # % of features
+  nthread = 2
+)
+```
+
+## Training
+
+Onto training! The syntax is very simple.   
+We first create a validation sample. For
+
+```{r}
+valid <- lgb.Dataset.create.valid(fraud_lgb,
+                                  fraud_test |> select(-is_fraud) |> as.matrix(),
+                                  fraud_test$is_fraud)
+```
+
+
+```{r}
+bst <- lightgbm(
+  data = fraud_train |> select(-is_fraud) |> as.matrix(),
+  label = fraud_train$is_fraud, # Target / label
+  params = train_params,        # Passing parameter values
+  nrounds = 20,                 # Number of trees in the model
+  eval_freq = 5,
+  verbose = 1,
+  valids = list(test = valid)
+)
+```
+
+## Predicting
+Next, we ask for the predictions of the first 700 rows of the test set. 
+
+```{r}
+predict(bst, fraud_test[1:700,] |> select(-is_fraud) |> as.matrix()) |> round()
+```
+
+As expected, the resulting vector is rather **sparse**.
+
+## Other parameter options
+
+Modern libraries in machine learning allow for many options (again, see the [parameter list](https://lightgbm.readthedocs.io/en/v3.3.2/Parameters.html)).   
+
+Let's have a look at several extensions:    
+
+- **dropout**: adapted from neural nets, the idea is to [drop some trees](https://arxiv.org/abs/1505.01866), more or less randomly.     
+- **monotonicity**: it may be the case that for some features, the modeller wishes to impose a **directional link** with the **target** (e.g., increasing or decreasing).    
+- **regularization**: the idea of penalizing output values to reduce the variance of predictions (and **overfitting**).    
+- **early stopping** is also now implemented in most libraries: it can save time when the algo does not learn after a few rounds.
+
+
+We adapt the set of parameters below:
+
+```{r}
+nb_feat <- ncol(fraud_train |> select(-is_fraud)) # Nb features
+mono_const <- rep(0, nb_feat)
+mono_const[1] <- 1             # First feature is amount: fraud increases with amount
+# If you have a prior on gender, it's also possible to enforce a constraint
+
+train_params <- list(
+  num_leaves = 15,           # Max nb leaves in tree
+  learning_rate = 0.1,       # Learning rate
+  objective = "binary",      # Loss function
+  max_depth = 4,             # Max depth of trees
+  min_data_in_leaf = 50,     # Nb points in leaf
+  bagging_fraction = 0.5,    # % of observations
+  feature_fraction = 0.7,    # % of features
+  nthread = 4,               # Parallelization
+  boosting = "dart",         # DART = dropping
+  drop_rate = 0.1,           # Dropping rate
+  lambda_l1 = 0.3,           # Penalizing leave norms
+  seed = 42,                 # For reproducibility?
+  # early stopping not available with DARTs
+  #early_stopping_round = 10, # Early stopping after X round if no improvement
+  monotone_constraints = mono_const,
+  force_row_wise = T
+)
+```
+
+New round of training.
+
+```{r}
+bst <- lightgbm(
+  data = fraud_train |> select(-is_fraud) |> as.matrix(),
+  label = fraud_train$is_fraud, # Target / label
+  params = train_params,        # Passing parameter values
+  nrounds = 20,                 # Number of trees in the model 
+  eval_freq = 5,
+  verbose = 1,
+  valids = list(test = valid)
+)
+```
+
+The loss is higher, which makes sense, given the additional constraints we have imposed.  
+
+## Cross-validation
+
+What if we want to test results on alternative subsets of the data, via **cross-validation**?
+
+```{r, message = F, warning = F}
+cv_model <- lgb.cv(
+  params = train_params,
+  data = fraud_train |> select(-is_fraud) |> as.matrix(),
+  label = fraud_train$is_fraud, # Target / label
+  eval_freq = 80,
+  nrounds = 3,                  # Still number of trees
+  nfold = 5
+)
+cv_model$record_evals
+```
+
+## Testing several parameter values
+
+Ok, but what if we want to test several parameter combinations?  
+With the [**tidymodels**](https://www.tidymodels.org/) ecosystem, this is possible via dedicated functions from the [**tune package**](https://tune.tidymodels.org/), but let's see if we can code it in R with **functional programming**.
+
+First, let's create the combinations. 
+
+```{r}
+num_leaves <- c(5,30)
+learning_rate <- c(0.01, 0.05, 0.2)
+pars <- expand.grid(num_leaves, learning_rate)
+num_leaves <- pars[,1]
+learning_rate <- pars[,2]
+```
+
+Next, the training function. Note that some parameters are flexible, others are fixed.
+
+```{r}
+train_func <- function(num_leaves, learning_rate, fraud_train){
+  train_params <- list(             # First, the list of params
+    num_leaves = num_leaves,        # Max nb leaves in tree
+    learning_rate = learning_rate,  # Learning rate
+    objective = "binary",           # Loss function
+    max_depth = 3,                  # Max depth of trees
+    min_data_in_leaf = 50,          # Nb points in leaf
+    bagging_fraction = 0.5,         # % of observations
+    feature_fraction = 0.7,         # % of features
+    nthread = 4,                    # Parallelization
+    force_row_wise = T
+  )
+  # Next we train
+  bst <- lightgbm(
+    data = fraud_train |> select(-is_fraud) |> as.matrix(),
+    label = fraud_train$is_fraud, # Target / label
+    params = train_params,        # Passing parameter values
+    valids = list(test = valid),
+    eval_freq = 5,
+    nrounds = 10                  # Number of trees in the model
+  )
+  # Next, we record the final loss (depends on the model/loss defined above)
+  return(loss = bst$record_evals$test$binary_logloss$eval[[10]]) 
+}
+train_func(10, 0.1, fraud_train) # Testing
+```
+
+
+Finally, we can launch a function that is going to span all free parameters.
+
+```{r, message = F, warning = F}
+grd <- pmap(list(num_leaves, learning_rate),     # Parameters for the grid search
+            train_func,                          # Function on which to apply the grid search
+            fraud_train = fraud_train            # Non-changing argument (data is fixed)
+)
+grd <- bind_cols(pars, tibble(loss = grd))
+grd
+```
+
+
+
+## Manual random oversampling
+
+The problem with fraud datasets is that they are **very imbalanced**: in our sample fewer than 1% of observations are actual frauds... This complicates the learning phase. Hence, it can make sense to resample the training data to reduce imbalance.  
+Let's see how we can proceed.
+
+We will use the function below.
+
+```{r}
+sample(10, 5, replace = T) # If true, the same number can be chosen several times
+```
+
+We first sample the fraud rows.
+
+```{r}
+# First, we locate the fraudulent observations
+fraud_ind <- which(fraud_train$is_fraud == 1)
+sample_size <- 10000
+ratio <- 0.05
+# First, select the fraud instances
+fraud_ind <- fraud_ind[sample(1:length(fraud_ind), 
+                              sample_size*ratio, 
+                              replace = F)]
+fraud_sub <- fraud_train[fraud_ind,]
+fraud_sub |> head(3)
+```
+
+Then, the non-fraud ones and aggregation.
+
+```{r}
+non_fraud_ind <- which(fraud_train$is_fraud == 0)
+non_fraud_ind <- non_fraud_ind[sample(1:length(non_fraud_ind), 
+                                      sample_size*(1-ratio), 
+                                      replace = F)]
+non_fraud_sub <- fraud_train[non_fraud_ind,]
+fraud_train_sub <- bind_rows(fraud_sub, non_fraud_sub)
+```
+
+And just checking:
+
+```{r}
+mean(fraud_train_sub$is_fraud)
+```
+
+
+## Oversampling with SMOTE
+
+Below, we resort to one implementation of Synthetic Minority Oversampling Technique ([**SMOTE**](https://www.jair.org/index.php/jair/article/view/10302)).   
+It is popular, yet its efficacy has recently been [**questioned**](https://arxiv.org/abs/2201.08528). 
+
+```{r}
+library(SMOTEWB)
+train_smote <- SMOTE(x = fraud_train |> select(-is_fraud), 
+                     y = fraud_train$is_fraud |> as.factor(), 
+                     k = 5)
+head(train_smote$x_new[,1:9])
+```
+
+Let's check the proportion!
+
+```{r}
+summary(train_smote$y_new)
+```
+
+In this case, the data is perfectly balanced, which may be too strong a requirement...
+
+# Neural networks with Keras
+
+**NOTE**: Tensorflow and M1 Macs don't go too well together. Read the [following post](https://github.com/rstudio/tensorflow/issues/559#issuecomment-1460226364) for more on the matter.  
+The chunk below follows the above procedure. If you do not work on an M1 mac, please skip it.
+
+```{r, message = F, warning = F}
+library(reticulate)
+use_condaenv("r-tensorflow") # This is for M1 Macs with special conda environment
+```
+
+
+Next, we move to **neural networks**. In this case, categorical variables must be re-coded.  
+Below, the target will be split in two binary columns (fraud versus no-fraud).  
+This is a bit heavy though...
+
+```{r, message = F}
+library(keras)
+#install_keras()  # You need to run this the first time
+nn_train_target <- dummy_cols(fraud_train$is_fraud, remove_selected_columns = T) |> as.matrix()
+nn_test_target <- dummy_cols(fraud_test$is_fraud, remove_selected_columns = T) |> as.matrix()
+```
+
+In Keras, there are also many options available. Below, we resort to:    
+
+- **initializers** both for weights and biases;     
+- **penalizations** (via regularizers)     
+- **dropout**: when some units are removed to mitigate **overfitting**
+
+```{r, message = F, warning = F}
+model <- keras_model_sequential()
+model %>%   # This defines the structure of the network, i.e. how layers are organized
+  layer_dense(units = 32, 
+              activation = 'relu', 
+              input_shape = ncol(fraud_train) - 1) %>%       # Size of input (compulsory for 1st layer)
+  layer_dense(units = 16, activation = 'tanh',               # Nb units & activation
+              kernel_initializer = "random_normal",          # Initialization of weights
+              kernel_constraint = constraint_nonneg()) %>%   # Weights should be nonneg
+  layer_dropout(rate = 0.25) %>%                             # Dropping out 25% units
+  layer_dense(units = 8, activation = 'elu',                 # Nb units & activation
+              bias_initializer = initializer_constant(0.2),  # Initialization of biases
+              kernel_regularizer = regularizer_l2(0.01)) %>% # Penalization of weights 
+  layer_dense(units = 2, activation = 'softmax')             # Softmax for categorical output
+```
+
+Below, we use [**Adam optimization**](https://arxiv.org/abs/1412.6980) for learning (gradient descent). 
+
+```{r}
+model %>% compile(                                  # Model specification
+  loss = 'binary_crossentropy',                     # Loss function
+  optimizer = optimizer_adam(learning_rate = 0.005, # Optimisation method (weight updating)
+                             beta_1 = 0.9,          # Parameter for Adam
+                             beta_2 = 0.95),        # Parameter for Adam 
+  metrics = c('categorical_accuracy')               # Output metric
+)
+summary(model)                                      # Model structure
+```
+
+We also resort to **early stopping** here: this can be very useful for large models that require long training times.  
+
+```{r, message = F, warning = F}
+fit_NN <- model %>% 
+  fit(fraud_train |> select(-is_fraud) |> data.matrix(), # Training features
+      nn_train_target,                                   # Training labels
+      epochs = 20, batch_size = 2048,                    # Training parameters
+      validation_data = list(fraud_test |> select(-is_fraud) |> data.matrix(), 
+                             nn_test_target),            # Test data
+      verbose = 0,                                       # No comments from algo
+      callbacks = list(
+        callback_early_stopping(monitor = "val_loss",    # Early stopping:
+                                min_delta = 0.001,       # Improvement threshold
+                                patience = 4,            # Nb epochs with no improvmt 
+                                verbose = 2              # Warning policy while training
+        )
+      )
+  )
+plot(fit_NN) + theme_light()
+```
+
+In order to save time, learning has stopped early...
+
+Let's fetch some predictions below. 
+
+```{r}
+preds <- predict(model, fraud_test[1:700,] |> select(-is_fraud) |> data.matrix())
+```
+
+And show them...
+
+```{r}
+round(preds[1:30,])
+```
+
+How many frauds are detected in the test set? 
+
+```{r}
+sum(preds[,2] == 1)
+sum(fraud_test$is_fraud)
+```
+
+Aoutch... the algo makes the simplest bet that there is no fraud at all.   
+
+
+# Interpretability
+
+Finance is often a critical discipline because it involves **money**.   
+Hence, when people rely on a black-box algorithm for decision-making, they usually prefer to understand why the algorithm comes to particular conclusions.   
+To do so, we need to "*white-box*" the outcome of the predictions.  
+Of course, there are many ways to do that, but there is one (among others) important dichotomy:   
+
+- **global interpretability**: in this case, we seek to understand how the model works on a large set of observations, for instance, on the whole training set.    
+- **local interpretability**: in this case, the focus is set on one (or a few) observations and the aim is to understand how the model behaves for this particular point.  
+
+Global interpretability can also be either model-specific or model-independent.  
+For instance, for tree models, **variable importance** is one way to understand when a model gives more (decision) weight to particular features. The process is the following: each time a feature is selected as a splitting variable, the resulting gain (in loss reduction) is allocated to this feature. After the growing of a tree, each feature has its total importance, i.e., the sum of all gains that it has permitted. With random forests of boosted trees, it suffices to aggregate these values (possibly discounted by a learning rate). 
+
+All tree-based packages propose these kinds of metrics. 
+Below, we show the result from the lightGBM model that we trained earlier. 
+
+```{r}
+lgb.importance(bst) |>
+  ggplot(aes(x = Gain, y = reorder(Feature, Gain))) + geom_col(fill = "#22AABB", alpha = 0.7) +
+  theme_bw() + theme(axis.title.y = element_blank())
+```
+
+The amount seems to be an important variable in the model.  
+Clearly importance is concentrated in a handful of features...
+
+In lightGBM, there is also a **local interpretation** that is proposed!
+
+```{r}
+LGB_intepret <- lgb.interprete(bst, fraud_test[1:700,] |> select(-is_fraud) |> data.matrix(), 1:2)
+LGB_intepret
+lgb.plot.interpretation(
+  tree_interpretation_dt = LGB_intepret[[1L]]
+  , top_n = 8
+) 
+
+```
+
+Let's try to make sense of this with actual numbers.  
+The average prediction over the testing sample is `r predict(bst, fraud_test |> select(-is_fraud) |> as.matrix()) |> mean() |> round(4)` whereas the prediction is `r predict(bst, fraud_test[1,] |> select(-is_fraud) |> as.matrix())`. The bars above show which features contribute the most to the discrepancy between these two values. 
+This interpretation follows that of [**Shapley values**](https://christophm.github.io/interpretable-ml-book/shapley.html). 
+
+
+```{r}
+
+```
+
+
+

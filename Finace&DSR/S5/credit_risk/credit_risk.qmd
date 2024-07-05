@@ -1,0 +1,571 @@
+---
+title: "Credit risk with machine learning"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    page-layout: full
+    df-print: kable
+    theme: flatly
+    fontsize: 1.0em
+    embed-resources: true
+---
+
+**WARNING**: this notebook relies on several **R packages**. Whenever one is called (for instance via a call such as "*library(torch)*"), this implies that the package has been installed, e.g., via "*install.packages("torch")*". Hence, make sure the following packages are installed!
+
+```{r}
+# install.packages("tidyverse") 
+# install.packages(c("tidymodels", "randomForest", "doParallel", "torch", "caTools", "tabnet", "lime", "luz"))
+```
+
+**NOTE**: <span style="color:#21AB70">in **data science**, one of the most crucial competence is **domain knowledge**.</span>   
+Data is key (more than any algorithm) and domain knowledge helps understand how it is built and which features are likely to matter most.
+
+# Introduction
+
+## Principles
+
+[**Credit risk**](https://en.wikipedia.org/wiki/Credit_risk) pertains to situations when a lender (e.g., a bank) face uncertainty so as to whether it will receive debt payments. Basically, there are two types of customers: individuals (e.g., people wanting to buy a car or a house), and firms (willing to finance projects, acquisitions, etc.).
+
+There are several quantities that are important to lenders:
+
+-   the **probability of default** (PD), which is self-explanatory.   
+-   the **loss given default** (LGD): when the default occurs, the amount of money that will be lost (1-recovery rate). 
+-   the **exposure at default** (EAD): how much money was still owed when the default occurs.    
+-   the **expected loss** (ED): average amount of money lost, equal to ED = PD * LGD * EAD.
+
+The EAD is easy to compute and the recovery rate is often approximated accurately. The most complicated part is the probability of default....   
+Basically, in order to be able to understand the drivers of these quantities, we need information on the customers, i.e., **DATA**!
+
+-   For **individuals** (*credit scoring*), this usually encompasses: age, gender, income, wealth, job type, payment history (prior defaults), etc.  
+-   For **corporations** (*credit rating*), lenders consult credit risk agencies (Standard & Poors, Moodys, Fitch Ratings) that ave developed complex models that usually rely on accounting data linked to revenue, debt, cash-flows, financial ratios, prior credit history, macro-economic variables, etc.
+
+
+
+
+## A few **free** references
+
+Below, we list a few interesting resources on the topic of **credit risk** and **credit scoring**:
+
+- [Credit Risk Scorecards: Developing and Implementing Intelligent Credit Scoring](http://students.aiu.edu/submissions/profiles/resources/onlineBook/b9m4e7_Credit_Risk%20Scorecards%20Developing%20finance.pdf)   
+- [An Overview on the Landscape of R Packages for Open Source Scorecard Modelling](https://www.mdpi.com/2227-9091/10/3/67) -[arXiv version here](https://arxiv.org/pdf/2006.11835.pdf)     
+- [Credit scoring methods: Latest trends and points to consider](https://www.sciencedirect.com/science/article/pii/S2405918822000095)    
+- [Credit Scoring Approaches Guidelines](https://thedocs.worldbank.org/en/doc/935891585869698451-0130022020/original/CREDITSCORINGAPPROACHESGUIDELINESFINALWEB.pdf) from the World Bank      
+- this [**github repo**](https://github.com/JLZml/Credit-Scoring-Data-Sets) lists free credit risk related datasets
+
+# Data
+
+In the course part, we dig into only one of these examples.   
+There are lots of datasets online, but to find neat ones (good size, format, clear column names).   
+The data we rely one below comes from this [Kaggle competition](https://www.kaggle.com/competitions/home-credit-default-risk/data).
+
+First, let's load the packages & dataset.  
+**IMPORTANT**: the data (.csv file) is also available on this [**drive link**](https://drive.google.com/file/d/1eBtQquDRJNqiUls1BX5FszC9XRNHWJqX/view?usp=sharing).    
+$\rightarrow$ Please download it and place it in the same folder as the notebook.  
+
+```{r, message = F, warning = F}
+library(tidyverse)                           # Data wrangling
+library(tidymodels)                          # ML workflow
+data <- read_csv("application_train.csv")    # Load data
+```
+
+The data is super large for a "normal" computer. We don't want training times that are too long.  
+So let's shrink its size (you can skip this step if you want the "full" experience!).  
+To do so, have a look at missing data first.    
+We locate the columns with more that 25% of missing data.  
+Then, remove these columns.
+
+```{r}
+missing_names <- colMeans(is.na(data)) |>
+  data.frame() |>                            # Convert to dataframe
+  rownames_to_column() |>                    # Shift row names to a column
+  `colnames<-` (c("name", "missing")) |>     # Change column names  
+  filter(missing > 0.25)                     # Show features with lots of missing data
+missing_names |> head(12)                    # First 12 names
+data <- data |>                              # Remove these features
+  select(-(missing_names |> pull(name)))
+```
+
+Let's have a look at **column names**...
+
+```{r}
+colnames(data)
+```
+
+The "FLAG_" variables don't seem super clear. Let's remove them too.
+
+```{r}
+data <- data |> 
+  select(!starts_with("FLAG_")) |> # Remove columns that start with FLAG_
+  select(-SK_ID_CURR)              # This column won't be useful as well
+```
+
+Finally, because the dataset is still very large, let's remove all observations with missing data.  
+Since we will perform a classification task, the target should be a factor, i.e., a **categorical variable**.  
+This is required by some packages (e.g., randomForest). 
+
+```{r}
+data <- data |>                            
+  na.omit() |>                                    # Remove rows with missing points
+  mutate(TARGET = as.factor(TARGET),              # Categorize TARGET (for classification)
+         across(where(is.character), as.factor))
+data |> head()
+```
+
+There, now we have a clean sample to work with! But it still may not be optimal. This remark comes a posteriori after fitting a few models. This requires to dive more deeply into the characteristics of the data.
+
+One potential source of problems is categorical columns. Some have too many categories which will create too much trouble later on. For instance, ORGANIZATION_TYPE has 57 possible values... Also, the weekday of the beginning of the process does not seem super important. Moreover, to enhance the quality of the data, we transform textual columns into R **factors**. This is only useful because the **randomForest** package which we use first handles categorical data well. For many other models, like **boosted trees** of **neural networks**. This will not help unfortunately.  
+
+```{r}
+data <- data |> 
+  select(-ORGANIZATION_TYPE, -WEEKDAY_APPR_PROCESS_START) |>
+  mutate(across(where(is.character), as.factor))  # All text columns to categories
+```
+
+Lastly, after playing with some models, it turns our that some variables do not have enough variations to be relevant (post sub-sampling). Hence, we remove them too. **This is done manually ex-post**.
+
+```{r}
+data <- data |> select(-LIVE_REGION_NOT_WORK_REGION,
+                       -LIVE_CITY_NOT_WORK_CITY,
+                       -REG_CITY_NOT_LIVE_CITY,
+                       -REG_REGION_NOT_LIVE_REGION,
+                       -REG_CITY_NOT_WORK_CITY,
+                       -REG_REGION_NOT_WORK_REGION,
+                       -DEF_30_CNT_SOCIAL_CIRCLE,
+                       -DEF_60_CNT_SOCIAL_CIRCLE,
+                       -AMT_REQ_CREDIT_BUREAU_HOUR,
+                       #-AMT_REQ_CREDIT_BUREAU_DAY # Already removed
+                       -AMT_REQ_CREDIT_BUREAU_WEEK,
+                       -AMT_REQ_CREDIT_BUREAU_MON,
+                       -AMT_REQ_CREDIT_BUREAU_QRT)
+```
+
+
+For training time purposes (again!), we will reduce the data to 40k rows.   
+But the following step can be easily omitted to train on the full set.
+
+```{r}
+data <- data[(1:40000)*5,]  # Keeps only 40k observations
+```
+
+
+# Baseline learning
+
+## Preparation
+
+As is usual in machine learning, we will split the data in two (we omit validation for simplicity).  
+In the first exercise, we will use **cross-validation**. For more on that, we refer to the [**tidymodels**](https://www.tidymodels.org/) in general and to [rsample](https://rsample.tidymodels.org/reference/index.html) in particular. Below, we show a scheme of the packages within the **tidymodels** and the stage at which they are used. 
+
+![](images/tidymodels.png)
+
+First: data preparation with training/testing splitting. 
+
+```{r}
+data_split <- initial_split(data, prop = 0.5)         # 0.5 to save time on training...
+data_train <- training(data_split) |> vfold_cv(v = 5) # Creates the folds
+data_test <- testing(data_split)
+```
+
+## First model with random forests
+
+For this course, we will first use **random forests**. To find available models in the tidymodels/[parsnip](https://www.tidymodels.org/find/parsnip/). The corresponding model is rand_forest().
+
+The advantage of using tidymodels is that it gathers many different ML packages into a unique framework. One important choice (excluding ensembles) is which family of algorithm you want to work with. Now, there are several implementations of Random Forests in R, and we pick **randomForest**.   
+The code below is inspired from the [tutorial](https://www.tidymodels.org/start/tuning/).  
+Basically, we first select a model family (random forest), then the package/library that implements it, and then finally the supervising task (**classification** versus **regression**)
+
+```{r, message = F, warning = F}
+library(randomForest)             # Just in case...
+rf_model <-                       # Here we define the model
+  rand_forest(
+    mtry = tune(),                # The hyperparameters will be tuned!
+    trees = tune()
+  ) |>
+  set_engine("randomForest") |>   # Specifies the package
+  set_mode("classification")      # Classification or regression
+```
+
+Next, we move on to the definition of the grid (for the search).  
+In terms of parameters:   
+- **mtry** is the number of variables randomly chosen as predictors   
+- **trees** is the number of trees trained in the forest   
+- **sampsize** is the number of observations randomly sampled to train one given tree   
+- **nodesize** is the minimum number of observations required in the terminal leaves of all trees    
+- **maxnodes** is the maximum number of leaves for all trees
+
+Below, we consider only the first two. 
+
+```{r}
+rf_grid <- grid_regular(mtry(range = c(10, 20)),  # There are dedicated function for parameters!
+                        trees(range = c(5, 20)),  # Small numbers to reduce CPU time
+                        levels = c(2,3))          # 2 & 3 choices for 1st and 2nd parameters
+rf_grid
+```
+
+```{r}
+set.seed(42)
+rf_wf <- workflow() |>
+  add_model(rf_model) |>
+  add_formula(TARGET ~ .)  # This means we predict TARGET with all other variables
+```
+
+Below, we launch the training process across the grid values.  
+Because training takes some time, we resort to **parallelization**.   
+Whenever you have 4+ cores in your computer, this can help you divide training times by 2+.
+
+```{r, message = F, warning = F}
+library(doParallel)
+doParallel::registerDoParallel(6)        # Specifies the number of cores
+rf_res <- rf_wf |>
+  tune_grid(                             # This will train on all params
+    resamples = data_train,
+    grid = rf_grid
+  )
+show_best(rf_res, metric = "accuracy")   # Shows the best params
+```
+
+Average accuracy seems high...   
+But at the same time, there are few instances of strictly positive TARGET values.   
+This is a well known issue with highly **unbalanced datasets**.  
+
+```{r}
+mean(data$TARGET |> as.character() |> as.numeric() == 0)
+```
+
+Hence, if we predict 0 each time, we would be correct 92% of the time. This level of accuracy for our algorithm is therefore not impressive... more on that later.
+
+
+
+
+
+# A neural network with *torch*
+
+## Introduction
+
+Next we move to another family of predictive tools (supervised learning algorithms): **neural networks**!    
+There are two main frameworks, mostly developed in Python: pytorch (developed by Meta) and keras/tensorflow (developed by Google). Here we want to test the first, but without using Python, hence we will rely on the foundational library, which is **torch**. 
+
+```{r, message = F, warning = F}
+library(torch)
+```
+
+Below we prepare the data in **torch** fashion (not super user friendly...).
+
+[**torch**](http://torch.ch/) is an ML framework coded in Lua/C. In Python => [Pytorch](https://pytorch.org/), in R => [torch for R](https://torch.mlverse.org/).
+
+First, we need to re-prepare the data because NNs can only take **numerical** inputs.  
+Moreover, the **scales** are all over the place... and this is also bad for NNs, so we need to solve it.
+
+```{r}
+data_nn <- data |> select(where(is.numeric))           # Keeps the numerical columns
+
+scale_0_1 <- function(v){(v-min(v))/(max(v)-min(v))}   # Function for scaling
+data_nn <- data_nn |>
+  mutate(across(everything(), scale_0_1))              # Apply the scale_0_1 function to all columns
+
+data_nn <- bind_cols(TARGET = data$TARGET, data_nn)    # Adding the target
+data_nn$TARGET <- data_nn$TARGET |> as.character() |> as.numeric()
+```
+
+## Data preparation
+
+The idea is to start preparing everything, especially for (random) **batches**.    
+The code below is inspired from this [post](https://torch.mlverse.org/docs/articles/loading-data.html).    
+The syntax is quite pythonic. 
+
+```{r, message = F, warning = F}
+scoring_dataset <- dataset(
+  name = "scoring_dataset",
+  initialize = function(index) {
+    self$data <- self$prepare_scoring_data(index)
+  },
+  
+  .getitem = function(index) {
+    x <- self$data[index, 2:-1]               # Predictors
+    y <- self$data[index, 1]$to(torch_long()) # Target
+    list(x, y)
+  },
+  
+  .length = function() {
+    self$data$size()[[1]]
+  },
+  
+  prepare_scoring_data = function(index) {
+    input <- na.omit(data_nn |> select(where(is.numeric))) 
+    input <- input[index, ]                    # Here we slice the data (too long)
+    input <- data.matrix(input)
+    torch_tensor(input)
+  }
+)
+```
+
+Let's have a look. We prepare the inputs. 
+
+```{r}
+score_data <- scoring_dataset(1:5000)            # A subset of the data
+score_data$.length()
+score_data$.getitem(1)
+dl <- score_data |> dataloader(batch_size = 32)
+```
+
+## Model architecture
+
+Below, we specify the network's architecture... There are a couple of important functions:
+
+- [nn_linear()](https://torch.mlverse.org/docs/reference/nn_linear.html) is a **dense** layer, the most common used ones   
+- nnf_relu() and nnf_sigmoid() are activation functions    
+- [nn_dropout()](https://torch.mlverse.org/docs/reference/nn_dropout.html) is a layer that randomly removes units
+
+The full reference is [here](https://torch.mlverse.org/docs/reference/index.html).
+
+```{r, message = F, warning = F}
+net <- nn_module(
+  "ScoringNet",
+  initialize = function() {
+    self$fc1 <- nn_linear(21, 64) # There are 21 predictors in the data (1st number)
+    self$fc2 <- nn_linear(64, 8)
+    self$fc3 <- nn_linear(8,1)
+  },
+  # Below, we code the feed-forward structure
+  forward = function(x) {
+    x |> 
+      self$fc1() |> 
+      nnf_relu() |>
+      self$fc2() |> 
+      nnf_relu() |>
+      self$fc3() |>
+      nnf_sigmoid() 
+  }
+)
+model <- net()
+```
+
+The cheat sheet gives more functions/options.
+![](images/cheat_sheet.png) 
+
+
+
+Next, the optimizer (gradient descent)... with the **learning rate**.
+
+```{r}
+optimizer <- optim_sgd(model$parameters, lr = 0.01)
+```
+
+
+## Training
+
+And off we go! The syntax is quite puzzling... (more on that below)
+
+```{r}
+for(epoch in 1:10) {                        # Loop on epochs
+  l <- c()
+  coro::loop(for (b in dl) {                  # Loop on batchs
+    optimizer$zero_grad()                     # Initialize gradients to zero
+    output <- model(b[[1]])$to(torch_float()) # Forward pass
+    loss <- nnf_binary_cross_entropy(output, 
+                                     b[[2]]$to(torch_float()))    # Computes loss
+    loss$backward()                           # Computes dloss/dx for every parameter x
+    optimizer$step()                          # Parameter update
+    l <- c(l, loss$item())                    # Stores loss of batch
+  })
+  cat(sprintf("Loss at epoch %d: %3f\n", epoch, mean(l)))
+}
+```
+
+Then, onto predictions.  
+**REMEMBER**: neural networks are initialized randomly, hence predictions are random too!
+
+```{r, message = F, warning = F}
+score_data <- scoring_dataset(1001:1500)
+dl_test <- score_data %>% dataloader(batch_size = 1)
+
+preds <- c()
+coro::loop(for (b in dl_test) {               # Looping on the samples
+  output <- model(b[[1]])
+  preds <- c(preds, output %>% as.numeric())
+})
+# Accuracy below: we round predictions...
+mean(round(preds) == as_array(score_data$.getitem(1:500)[[2]]) )
+```
+
+
+## Evaluation
+
+Again, the problem of defaults (and frauds) is that datasets are highly imbalanced. In this case, it is common to compute the AUC: **area under the ROC curve**.
+
+```{r}
+library(caTools)
+colAUC(X = preds, 
+       y = as_array(score_data$.getitem(1:500)[[2]]), 
+       plotROC = TRUE) 
+```
+
+**Extension**: use embeddings to include categorical variables as in this [example](https://blogs.rstudio.com/ai/posts/2020-11-03-torch-tabular/).
+
+
+## Simpler syntax
+
+**NOTE** torch is known to have a pythonic (& arid) syntax, especially compared to TF-Keras.  
+This is why initiative to ease this have blossomed. In R, one such attempts is the [**luz**](https://github.com/mlverse/luz) package, which makes fitting a lot easier to code.
+
+```{r}
+library(luz)
+
+dl_train <- score_data |> dataloader(batch_size = 32)
+dl_test <- score_data |> dataloader(batch_size = 32)
+
+fit_luz <- net %>%
+  setup(
+    metrics = list(luz_metric_accuracy()),
+    optimizer = optim_adam,
+    loss = function(input, target) {
+      nnf_binary_cross_entropy(input, target$float()$unsqueeze(-1))
+    }
+  ) %>%
+  fit(dl_train, epochs = 10, valid_data = dl_test)
+```
+
+
+# Tabnets
+
+Standard neural networks often perform less well than tree ensembles on tabular data.  
+[Tabular networks](https://arxiv.org/abs/1908.07442) were introduced to improve their competitiveness.  
+In R, **tabnet** is embedded in tidymodels. 
+
+```{r, message = F, warning = F}
+library(tabnet)
+data_split_nn <- initial_split(data_nn |> mutate(TARGET = as.factor(TARGET)), 
+                               prop = 0.5) # 50% of sample to save time on training...
+data_train_nn <- training(data_split_nn) 
+data_test_nn <- testing(data_split_nn)
+```
+
+Then, the model. We refer to the documentation (and the original paper!) for the meaning of the parameters. We reproduce the description below:
+
+- **penalty**: the extra sparsity loss coefficient as proposed in the original paper. The bigger this coefficient is, the sparser your model will be in terms of feature selection. Depending on the difficulty of your problem, reducing this value could help.   
+- **batch_size**: (int) Number of examples per batch, large batch sizes are recommended. (default: 1024^2).     
+- **learn_rate**: initial learning rate for the optimizer. (<<1)   
+- **decision_width**: (int) Width of the decision prediction layer. Bigger values gives more capacity to the model with the risk of overfitting. Values typically range from 8 to 64.    
+- **attention_width**: (int) Width of the attention embedding for each mask. According to the paper n_d=n_a is usually a good choice. (default=8).    
+- **num_steps**: (int) Number of steps in the architecture (usually between 3 and 10).    
+- **feature_reusage**: (float) This is the coefficient for feature reusage in the masks. A value close to 1 will make mask selection least correlated between layers. Values range from 1.0 to 2.0.
+- **virtual_batch_size**: (int) Size of the mini batches used for "Ghost Batch Normalization" (default=256^2).    
+- **num_independent**: Number of independent Gated Linear Units layers at each step. Usual values range from 1 to 5.  
+- **num_shared**: Number of shared Gated Linear Units at each step Usual values range from 1 to 5.   
+- **momentum**: Momentum for batch normalization, typically ranges from 0.01 to 0.4 (default=0.02).  
+
+
+```{r}
+tab_mod <- tabnet(epochs = 5, 
+                  batch_size = 512, 
+                  decision_width = 8, 
+                  attention_width = 8,
+                  num_steps = 4, 
+                  penalty = 0.0001, 
+                  virtual_batch_size = 512, 
+                  momentum = 0.3,
+                  feature_reusage = 1.5, 
+                  learn_rate = 0.001) %>%
+  set_engine("torch", verbose = TRUE) %>%
+  set_mode("classification")
+```
+
+The syntax is similar in nature to the [**tidymodels**](https://www.tidymodels.org/).
+
+```{r}
+tab_wf <- workflow() |>
+  add_model(tab_mod) |>
+  add_formula(TARGET ~ .) 
+```
+
+```{r}
+fitted_tabnet <- tab_wf %>% fit(data_train_nn)
+```
+
+To access training data/performance:
+
+```{r}
+# fitted_tabnet$fit$fit$fit$fit$metrics
+```
+
+To predict:
+
+```{r}
+pred_nn <- predict(fitted_tabnet, data_test_nn)
+mean(pred_nn$.pred_class == data_test_nn$TARGET)
+```
+
+Hard to beat the 92% threshold!
+
+
+# Interpretability
+
+Finance is often a critical discipline because it involves **money**.    
+Hence, when people rely on a black-box algorithm for decision-making, they usually prefer to understand why the algorithm comes to particular conclusions.   
+To do so, we need to "*white-box*" the outcome of the predictions.  
+Of course, there are many ways to do that, but there is one (among others) important dichotomy:  
+- **global interpretability**: in this case, we seek to understand how the model works on a large set of observations, for instance, on the whole training set.  
+- **local interpretability**: in this case, the focus is set on one (or a few) observations and the aim is to understand how the model behaves for this particular point.  
+
+One popular approach for the latter is Local Interpretable Model-agnostic Explanation: [**LIME**](https://arxiv.org/abs/1602.04938).    
+The idea is sketched below. 
+
+The original (complex) model is $f$ and it is **approximated** at instance $x$ by the interpretable model $g$ that belongs to a large class $G$. The vicinity of $x$ is denoted $\pi_x$ and the complexity of $g$ is written $\Omega(g)$. LIME seeks an interpretation of the form
+$$\xi(x)=\underset{g \in G}{\text{argmin}} \, \mathcal{L}(f,g,\pi_x)+\Omega(g),$$
+where $\mathcal{L}(f,g,\pi_x)$ is the loss function (error/imprecision) induced by $g$ in the vicinity $\pi_x$ of $x$. 
+
+The penalisation $\Omega(g)$ is for instance the number of leaves or depth of a tree or the number of predictors in a linear regression.
+
+The vicinity of $x$ is defined by $\pi_x(z)=e^{-D(x,z)^2/\sigma^2},$ where $D$ is some distance measure. **Note**: this function *decreases* when $z$ shifts away from $x$. 
+
+The tricky part is the **loss function**. In order to minimise it, LIME generates artificial samples close to $x$ and averages/sums the error on the label that the simple representation makes. The formulation is the following:
+$$\mathcal{L}(f,g,\pi_x)=\sum_z \pi_x(z)(f(z)-g(z))^2$$
+the errors are weighted according to their distance from the initial instance $x$.
+
+Visually, one representation below from the original paper.
+
+
+```{r, out.width="600px"}
+knitr::include_graphics("images/lime.png")
+```
+
+
+Here, the task is classification: blue circles versus red crosses. The model is complex and clearly not linear.  
+Hence, the points and crosses are sampled in the vicinity of the bold red cross. This gives an idea of how the model behaves **locally** around the **target** point. Then, a linear model is fitted on these points a yields the dotted line. Locally, i.e., close to the bold cross, it works well: to the left are the crosses and to the right the blue circles. 
+
+Let's try this!
+**NOTE** the code below is adapted from: http://www.mlfactor.com/interp.html#lime
+For this test, we briefly re-train a Random Forest model like the ones used above. 
+
+```{r, warning= F, message = F}
+library(lime) 
+rf_model_2 <- randomForest(      # Training the RF model 
+  x = data |> select(-TARGET), 
+  y = data$TARGET,
+  mtry = 18,                     # 18 predictors for each tree
+  trees = 15,                    # 15 trees in the forest
+  sampsize = 25000,              # 20k observations used for each tree
+  nodesize = 30,                 # At least 30 obs in each leaf
+  maxnodes = 32,                 # No more than 32 leaves in total for each tree
+)
+```
+
+Once we have the model, LIME proceed in two steps.  
+We seek explanations for the first 2 observations in the sample. 
+
+```{r, fig.height=5.5}
+out_lime <- lime(data |> select(-TARGET), 
+                 model = as_classifier(rf_model_2))
+explanation <- explain(x = data |> 
+                         select(-TARGET) |>
+                         slice(1:2),            # First two instances in train_sample 
+                       explainer = out_lime,    # Explainer variable created above 
+                       labels = TRUE,
+                       n_permutations = 900,    # Nb samples for loss function
+                       n_features = 7           # Nb of features shown (important ones)
+)
+plot_features(explanation, ncol = 1)            # Visual display
+```
+
+The blue bars go in the direction of the final predictions, the red ones go against.  
+**NOTE**: unfortunately, the providers of the data would not specify what the "EXT_SOURCE" variables refer to...
