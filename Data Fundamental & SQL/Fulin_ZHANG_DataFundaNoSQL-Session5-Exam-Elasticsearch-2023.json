@@ -1,0 +1,386 @@
+# 
+# Final Exam 2023 - Elasticsearch
+# 
+### A - Movies Index ###
+
+# A-1 
+# "Quentin Tarantino" movies which rating >= 5 but neither an action movie nor a drama
+# Hint: a bool query for an exact search can be used
+# 2
+GET /movies2/_search
+{
+  "_source": {
+    "includes": [
+      "fields.title"
+    ]
+  },
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "match_phrase": {
+            "fields.directors": "Quentin Tarantino"
+          }
+        },
+        {
+          "range": {
+            "fields.rating": {
+              "gte": 5
+            }
+          }
+        }
+      ],
+      "must_not": [
+        {
+          "match": {
+            "fields.genres": "Action"
+          }
+        },
+        {
+          "match": {
+            "fields.genres": "Drama"
+          }
+        }
+      ]
+    }
+  }
+}
+
+# A-2
+# "J.J. Abrams" movies released between 2010 and 2015 with a better score for stories about "crash train"
+# Hint: use a bool query with a range filter
+# 3
+GET /movies2/_search
+{
+  "query": {
+    "bool":{
+      "must": [ {"match": {"fields.directors": "J.J. Abrams"}} ],
+      "should": [ {"match": { "fields.plot": "crash train" }} ], 
+      "filter": {
+        "range": {
+          "fields.release_date": { "from": "2010-01-01", "to": "2016-01-01"}
+        }
+      }
+    }
+  }
+}
+
+
+### B - Flight Records ###
+
+# B-01
+# Import the flights records in a "flights" index
+# Hints: 1°) delete the index "flights" if already existing (optional)
+#        2°) create the index "flights" with the corresponding mapping
+#        3°) load the flight records via a _bulk import command
+#
+
+# B-02
+# Analyse the general form and fields of a flight record
+# 
+GET /flights/_search?pretty
+{
+  
+}
+
+# B-03
+# Percentage of delayed flights in october 2023
+# Hints: 1°) Calculate the number of flights during october 2023
+#             with a range query with upper and lower bounds combined with an aggregation over the whole results
+#        2°) Calculate the number of delayed flights during october 2023 => find a criteria that indicate a delayed flight
+# 714/2881
+GET /flights/_search
+{
+  "size": 0,
+  "query": {
+    "range": {
+      "timestamp": {
+        "gte": "2023-10-01",
+        "lte": "2023-10-31"
+      }
+    }
+  },
+  "aggs": {
+    "total_flights": {
+      "value_count": {
+        "field": "FlightNum"
+      }
+    },
+    "delayed_flights": {
+      "filter": {
+        "term": {
+          "FlightDelay": true
+        }
+      }
+    }
+  }
+}
+
+
+# B-04
+# Flights of october 2023
+# 2881(all)/2521(w/cancelled)
+#
+GET /flights/_search
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "range": {
+            "timestamp": {
+              "format": "strict_date_optional_time",
+              "gte": "2023-10-01",
+              "lt": "2023-11-01"
+            }
+          }
+        }
+      ],
+      "should": [],
+      "must_not": [ {"match": {
+        "Cancelled": true
+      }} ]
+    }
+  },
+  "aggs": {
+    "delayed-flight-bucket": {
+      "value_count": {
+        "field": "Origin"
+      }
+    }
+  }
+}
+
+# B-05
+# Delayed flights in october 203
+# 714
+GET /flights/_search
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "must": [ { "match": {"FlightDelay": true}} ],
+      "filter": [
+        {
+          "range": {
+            "timestamp": {
+              "format": "strict_date_optional_time",
+              "gte": "2023-10-01",
+              "lt": "2023-11-01"
+            }
+          }
+        }
+      ],
+      "should": [],
+      "must_not": []
+    }
+  },
+  "aggs": {
+    "delayed-flight-bucket": {
+      "value_count": {
+        "field": "FlightDelay"
+      }
+    }
+  }
+}
+
+# B-06
+# Top 3 cities with highest cancelled flights
+# London(63)|Rome(59)|Quito(50)
+#
+
+GET /flights/_search
+{
+  "size": 0,
+  "query":{
+      "bool": {
+          "must": [
+              { "match": { "Cancelled": true}}
+          ]
+      }
+  },
+  "aggs": {
+    "cancellation_per_city": {
+      "terms": {
+        "field": "OriginCityName"
+        , "size": 3
+        , "order": {
+          "_count": "desc"
+        }
+      }
+    }
+  }
+}
+
+# B-07
+# Top 3 countries with their top 3 cities with highest number of cancelled flights
+# For each country: display the min & max flight delays in minutes
+#   For each city, display the average flight delay in minutes
+# IT(3160-360)/US(255-0-360)/JP(118-0-345)
+# 
+GET /flights/_search
+{
+  "size": 0,
+  "query":{
+      "bool": {
+          "must": [
+              { "match": { "Cancelled": true}}
+          ]
+      }
+  },
+  "aggs": {
+    "cancellation_per_country": {
+      "terms": { "field": "OriginCountry","size": 3 }
+      , "aggs": {
+        "per_city": {
+          "terms": {
+            "field": "OriginCityName", "size": 3
+          },
+          "aggs": {
+            "avg_delay_per_airport": {
+              "avg": {
+                "field": "FlightDelayMin"
+              }
+            }
+          }
+        },
+        "max_delay_per_country": {
+          "max": {
+            "field": "FlightDelayMin"
+          }
+        },
+        "min_delay_per_country": {
+          "min": {
+            "field": "FlightDelayMin"
+          }
+        }
+      }
+    }
+  }
+}
+
+# B-08
+# Scoring interpretation
+# Distribution of terms within the "weather" field
+# Hints: 1°) use an aggregate query
+#        2°) aggregate over the "weather" terms
+# "Clear", "Cloudy", "Rain", "Sunny", "Thunder & Lightning", "Hail", "Damaging Wind", "Heavy Fog",
+GET /flights/_search?pretty
+{
+  "size": 0,
+  "aggs": {
+    "Weather": {
+      "terms": {
+        "field": "OriginWeather"
+      }
+    }
+  }
+}
+
+# B-09
+# Select the flights (except cancelled) departing from Italy with "Rain" or "Thunder & Lightning" weather conditions at their departure and "Sunny" upon their arrival
+# 56
+# 
+GET /flights/_search?pretty
+{
+  "size": 9,
+  "query": {
+    "bool": {"must": [
+                { "bool": { "should": [
+                              {"match": { "OriginWeather": "Rain"}},
+                              {"match": { "OriginWeather": "Thunder & Lightning"}}
+                          ]}
+                },
+                { "match": { "DestWeather": "Sunny" } }
+            ]
+            , "should": [ {"match": { "OriginCountry": "IT" }} ] 
+            , "must_not": [ {"match": { "Cancelled": false}} ]
+    }
+  },
+  "fields": [
+    "FlightNum", "OriginCountry",  "OriginWeather", "DestWeather", "Cancelled"],
+  "_source": "_none"
+}
+
+# B-10
+# Explain the main difference between the scores of the first result vs. the last result of the previous query
+# Propose 2 analysis queries and explain the main difference between the result of their ranking in the previous query
+#  
+# Explain the score from the first movie from the previous query : 
+# Hint: 1°) use an explain query
+#       2°) identify the document under analysis by it's _id
+GET /flights/_doc/He6Xj4sBj2TkY93KWdZU/_explain
+{
+  "query": {
+    "bool": {"must": [
+                { "bool": { "should": [
+                              {"match": { "OriginWeather": "Rain"}},
+                              {"match": { "OriginWeather": "Thunder & Lightning"}}
+                          ]}
+                },
+                { "match": { "DestWeather": "Sunny" } }
+            ]
+            , "should": [ {"match": { "OriginCountry": "IT" }} ] 
+            , "must_not": [ {"match": { "Cancelled": false}} ]
+    }
+  }
+}
+# Explain the score from the last movie from the previous query : 
+# Hint: 1°) use an explain query
+#       2°) identify the document under analysis by it's _id
+GET /flights/_doc/Me6Xj4sBj2TkY93KWdZV/_explain
+{
+  "query": {
+    "bool": {"must": [
+                { "bool": { "should": [
+                              {"match": { "OriginWeather": "Rain"}},
+                              {"match": { "OriginWeather": "Thunder & Lightning"}}
+                          ]}
+                },
+                { "match": { "DestWeather": "Sunny" } }
+            ]
+            , "should": [ {"match": { "OriginCountry": "IT" }} ] 
+            , "must_not": [ {"match": { "Cancelled": false}} ]
+    }
+  }
+}
+
+# B-11
+# Count the flights within the following categories:
+#   - no delay
+#   - less than 45 minutes
+#   - 45 < delay <= 2 hours
+#   - > 2 hours
+# Hint: Look for range aggregation: https://www.elastic.co/guide/en/elasticsearch/reference/8.10/search-aggregations-bucket-range-aggregation.html
+# 9779|413|647|2220
+# 
+
+GET /flights/_search?pretty
+{
+  "size": 0,
+  "aggs": {
+    "group_ranged": {
+      "range": {
+        "field": "FlightDelayMin",
+        "ranges": [
+          { "key": "No Delay",  "to": 1 },
+          { "key": "Slight Delay",  "from": 1, "to": 46 },
+          { "key": "Medium Delay",  "from": 46, "to": 121 },
+          { "key": "Need compensation",  "from": 121}
+        ]
+      }
+    }
+  }
+  
+}
+
+### C - Dashboard in Kibana ###
+# C-01
+# Create a map in Kibana, displaying the weight in minutes of the cumulative delay per airport worldwide.
+# Hints: 1°) Use the geospatial coordinates to both aggregate the cumulative delays per airport
+#             and also display each airport on the worldwide map in Kibana
+#        2°) Assign a proper color scale
+# 
+# ====> /!\ Send a screenshot with Kansas City|Chicago|Detroit on the same map (Kansas city on the left of the map and Detroit on the right and Chicago in the middle) <====
+# 
