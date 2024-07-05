@@ -1,0 +1,149 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r, warning=FALSE, message = F}
+library(tidyverse)
+library(dplyr)
+library(gapminder)
+```
+
+```{r}
+#| echo: false
+300:50
+```
+
+```{r}
+#| echo: true
+c(4, 13, 9, 8)
+```
+
+```{r}
+rep(c("bu","la"), 6)
+```
+
+```{r}
+matrix(1:12, nrow = 3, ncol = 4, byrow = T) # T or F, 打印顺序
+
+matrix(1:12, nrow = 3, ncol = 4, byrow = F)
+```
+
+```{r}
+type <- rep(c("Shirt", "Trousers", "Skirt", "Underwear"), 3)   # This is a vector of text
+size <- rep(c("Large", "Small", "Medium"), 4)                  # This is another vector of text
+price <- c(15, 59, 35, 10, 17, 89, 48, 12, 10, 49, 29, 9)      # This is a vector of numbers
+clothes <- tibble(type, size, price)    # The "old" version: data.frame(type, size, price)
+```
+
+```{r}
+clothes$type
+
+colnames(clothes)[3] <- "price"
+```
+
+```{r}
+diamonds[c(10, 60:63, 9000), c(7, 1:4)] 
+diamonds$cut == "Good"
+```
+
+```{r}
+gapminder %>%
+  filter(country == "France" & year == "1952") # Which is much better, syntax-wise
+```
+
+# 
+
+```{r}
+ substr("$100", 2, 4) # substr(text, where_to_start, where_to_stop) SEE ALSO str_remove("$100", "\\$")
+
+nchar("blabla")
+```
+
+```{r}
+gapminder %>% 
+  mutate(country = country %>% 
+  substr(2, nchar(as.character(country))-1))
+```
+```{r}
+as.character(1:6)                       # From number to text
+as.numeric(c("4.1", "2", "13"))         # From text to number
+str_replace_all(c("4,2", "5,6"), ",", ".") # Then pipe %>% as.numeric()
+```
+
+```{r}
+as.factor(c("small", "medium", "large", "large", "small"))     # From text to category
+```
+```{r}
+levels(diamonds$cut) # Odered!
+```
+```{r}
+levels(gapminder$continent)   # List of values: UNORDERED => alphabetical layout
+```
+```{r}
+nlevels(gapminder$country)    # Number of categories in the data
+```
+```{r}
+clothes <- clothes %>%
+  mutate(size = as.factor(size))
+# This is equivalent: clothes$size <- as.factor(clothes$size) 
+levels(clothes$size)   # Now a categorical variable!
+```
+```{r}
+clothes <- clothes %>%
+  mutate(size = size %>% 
+           recode_factor(Small = "Little",
+                                       Medium = "Medium", 
+                                       Large = "Big", 
+                                       .ordered = TRUE)
+         )
+clothes$size   # Now an ordered categorical variable!
+```
+```{r}
+diamonds %>%
+  filter(cut == "Good" | cut == "Very Good") %>%
+  head(5)
+
+diamonds %>%
+  filter(cut == "Ideal" & clarity == "IF") %>%
+  head(4)
+
+gapminder %>%
+  filter(continent != "Asia") %>%
+  head(3) # NOT EQUAL, the role of !: NOT
+
+gapminder %>% 
+  arrange(desc(year)) %>%. # 排序
+  filter(country %in% c("France", "Germany"))
+```
+# Left join
+```{r}
+table_1 <- tibble(brand = c("Porsche", "Volkswagen", "Tesla", "Ferrari"),
+                  co2 = c("High", "Medium", "Low", "High"))
+table_2 <- tibble(car = c("Tesla", "Porsche", "Volkswagen", "Bentley"),
+                  country = c("US", "Germany", "Germany", "UK"))
+table_1 %>% left_join(table_2, by = c("brand" = "car"))
+```
+```{r}
+as.Date("07--26//11", format = "%m--%d//%y", origin = "1970-01-01")
+```
+
+```{r}
+library(readr)
+movie_metadata <- read_csv("movie_metadata.csv")
+View(movie_metadata)
+```
+```{r}
+diamonds %>% 
+  group_by(cut) %>%
+  summarise(nb_diamonds = n()) # see also count()
+```
+

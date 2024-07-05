@@ -1,0 +1,61 @@
+---
+title: "Notebook example"
+author: "Mister X"
+date: "January 5, 2022"
+output:
+  html_document:
+    theme: yeti
+    toc: yes
+    number_sections: yes
+    toc_float:
+      collapsed: no
+subtitle: Test subtitle
+---
+
+# Header example
+
+## Secondary header
+
+### Third header
+
+To check themes: <https://www.datadreaming.org/post/r-markdown-theme-gallery/>
+
+Bla bla bla.
+
+```{r}
+plot(cars) # Comment - bla bla bla
+```
+
+# Other header
+
+## Another sub-header
+
+You can write bold text **here**. In *italic*. **BOLD** and ***bold & italic***.
+
+```{r}
+# And then write code in code chunks. This is a comment.
+1+1
+```
+
+# First analysis
+
+Further *text*.
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+filter(diamonds, carat > 3.5)
+```
+
+# Chunk options
+
+```{r, fig.align='center', fig.width=10, warning = F, message = F, echo = T, eval = T}
+library(gapminder)
+gapminder %>% 
+    group_by(country) %>% 
+    summarise(avg_pop = mean(pop),
+              avg_lifeexp = mean(lifeExp) %>% round(2)) %>% 
+    arrange(desc(avg_pop)) %>%
+    head(10) %>%
+    ggplot(aes(x = avg_pop, y = reorder(country, avg_pop))) + geom_col() +
+    theme_bw()
+```
